@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "tuiymet-app-63ebd"
+  },
+  "targets": {
+    "tuiymet": {
+      "hosting": {
+        "default": [
+          "tuiymet-app-63ebd"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
