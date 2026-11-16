@@ -204,19 +204,14 @@ class LoginPageState extends State<LoginPage> {
       UserCredential? userCredential;
 
       if (kIsWeb) {
-        // Web & PWA Google Sign-In Flow
+        // Web & PWA: Use redirect to bypass popup blocking and interop crashes
         final GoogleAuthProvider googleProvider = GoogleAuthProvider();
         googleProvider.addScope('email');
         googleProvider.addScope('profile');
         googleProvider.setCustomParameters({'prompt': 'select_account'});
 
-        try {
-          userCredential = await FirebaseAuth.instance.signInWithPopup(googleProvider);
-        } catch (_) {
-          // Fallback to redirect if running inside an installed PWA or popup blocker
-          await FirebaseAuth.instance.signInWithRedirect(googleProvider);
-          return;
-        }
+        await FirebaseAuth.instance.signInWithRedirect(googleProvider);
+        return; // Page redirects to Google
       } else {
         // Mobile (Android / iOS) Google Sign-In Flow
         final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
@@ -271,21 +266,14 @@ class LoginPageState extends State<LoginPage> {
 
     setState(() => _isLoading = true);
     try {
-      UserCredential? userCredential;
-      String? appleEmail;
-
       if (kIsWeb) {
-        // Web & PWA Apple Sign-In Flow via Firebase OAuthProvider
+        // Web & PWA: Use redirect for Apple Sign-In
         final OAuthProvider appleProvider = OAuthProvider('apple.com');
         appleProvider.addScope('email');
         appleProvider.addScope('name');
 
-        try {
-          userCredential = await FirebaseAuth.instance.signInWithPopup(appleProvider);
-        } catch (_) {
-          await FirebaseAuth.instance.signInWithRedirect(appleProvider);
-          return;
-        }
+        await FirebaseAuth.instance.signInWithRedirect(appleProvider);
+        return; // Page redirects to Apple
       } else {
         // Native Mobile (iOS / macOS) Apple Sign-In Flow
         final appleResult = await SignInWithApple.getAppleIDCredential(
@@ -297,20 +285,17 @@ class LoginPageState extends State<LoginPage> {
           accessToken: appleResult.authorizationCode,
         );
 
-        userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
-        appleEmail = appleResult.email;
-      }
+        final UserCredential userCredential = 
+            await FirebaseAuth.instance.signInWithCredential(credential);
+        final String? email = userCredential.user?.email ?? appleResult.email;
 
-      final String? email = userCredential?.user?.email ?? appleEmail;
+        if (email != null) {
+          await _saveEmailToHistory(email);
+        }
 
-      if (email != null) {
-        await _saveEmailToHistory(email);
-      }
+        if (!mounted) return;
+        setState(() => _isLoading = false);
 
-      if (!mounted) return;
-      setState(() => _isLoading = false);
-
-      if (userCredential != null) {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
@@ -328,7 +313,6 @@ class LoginPageState extends State<LoginPage> {
       _showMessageSnackBar('Apple Sign-In Error: $e', isError: true);
     }
   }
-
   void _toggleAuthMode() {
     setState(() {
       _isSignUpMode = !_isSignUpMode;
