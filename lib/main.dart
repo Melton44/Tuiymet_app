@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
 import 'theme.dart';
 
@@ -33,7 +34,19 @@ class TuiymetApp extends StatelessWidget {
       title: 'Tuiymet Farmers Group',
       debugShowCheckedModeBanner: false,
       theme: toiwetTheme,
-      home: const LoginPage(),
+      home: StreamBuilder<User?>(
+        stream: FirebaseAuth.instance.authStateChanges(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator()),
+            );
+          }
+          return snapshot.hasData
+              ? const MainNavigationScreen()
+              : const LoginPage();
+        },
+      ),
       routes: {
         '/login': (context) => const LoginPage(),
         '/home': (context) => const MainNavigationScreen(),
@@ -173,6 +186,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       userQuery = (routeArgs['email'] ?? '').toString().toLowerCase().trim();
     } else if (routeArgs is String) {
       loginType = routeArgs;
+    }
+
+    // After a page refresh there are no route arguments, so use the
+    // signed-in Firebase account instead.
+    if (userQuery.isEmpty) {
+      userQuery =
+          (FirebaseAuth.instance.currentUser?.email ?? '').toLowerCase().trim();
     }
 
     String activeRole = 'Member';
@@ -323,7 +343,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
                           const SizedBox(width: 8),
                           IconButton(
                             icon: const Icon(Icons.logout, color: Colors.redAccent),
-                            onPressed: () => Navigator.pushReplacementNamed(context, '/login'),
+                            onPressed: () async {
+                              await FirebaseAuth.instance.signOut();
+                              if (!context.mounted) return;
+                              Navigator.pushReplacementNamed(context, '/login');
+                            },
                             tooltip: 'Logout',
                           ),
                         ],

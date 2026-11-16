@@ -43,33 +43,6 @@ class LoginPageState extends State<LoginPage> {
   void initState() {
     super.initState();
     _loadSavedPreferences();
-    _checkRedirectSignIn();
-  }
-
-  Future<void> _checkRedirectSignIn() async {
-    if (!kIsWeb) return;
-    try {
-      final UserCredential result = await FirebaseAuth.instance.getRedirectResult();
-      if (result.user != null && mounted) {
-        final String? email = result.user?.email;
-        if (email != null) {
-          await _saveEmailToHistory(email);
-        }
-        if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => const MainNavigationScreen(),
-            settings: RouteSettings(arguments: {
-              'loginType': _selectedRole,
-              'email': email ?? 'user@tuiymet.com',
-            }),
-          ),
-        );
-      }
-    } catch (_) {
-      // Ignore if no pending redirect sign-in exists
-    }
   }
 
   Future<void> _loadSavedPreferences() async {
@@ -114,6 +87,21 @@ class LoginPageState extends State<LoginPage> {
     return RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(email);
   }
 
+  /// Single place that opens the dashboard after any successful sign-in.
+  void _goToDashboard(String? email, String fallbackEmail) {
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const MainNavigationScreen(),
+        settings: RouteSettings(arguments: {
+          'loginType': _selectedRole,
+          'email': email ?? fallbackEmail,
+        }),
+      ),
+    );
+  }
+
   Future<void> _handleAuthentication() async {
     final email = _emailController.text.trim();
     final password = _passwordController.text.trim();
@@ -153,19 +141,7 @@ class LoginPageState extends State<LoginPage> {
 
       if (response.statusCode == 200 || response.statusCode == 201) {
         await _saveEmailToHistory(email);
-
-        if (!mounted) return;
-
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => const MainNavigationScreen(),
-            settings: RouteSettings(arguments: {
-              'loginType': _selectedRole,
-              'email': email,
-            }),
-          ),
-        );
+        _goToDashboard(email, email);
       } else {
         final data = jsonDecode(response.body);
         _showMessageSnackBar(data['message'] ?? 'Authentication failed.', isError: true);
@@ -176,20 +152,11 @@ class LoginPageState extends State<LoginPage> {
 
       // Offline Demo Fallback
       await _saveEmailToHistory(email);
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (context) => const MainNavigationScreen(),
-          settings: RouteSettings(arguments: {
-            'loginType': _selectedRole,
-            'email': email,
-          }),
-        ),
-      );
+      _goToDashboard(email, email);
     }
   }
 
- Future<void> _handleGoogleSignIn() async {
+  Future<void> _handleGoogleSignIn() async {
     // Guard against unsupported desktop platforms (Windows, Linux)
     if (!kIsWeb && (Platform.isWindows || Platform.isLinux)) {
       _showMessageSnackBar(
@@ -199,20 +166,45 @@ class LoginPageState extends State<LoginPage> {
       return;
     }
 
-    // On Web & PWA, trigger redirect immediately without popup/try-catch interference
+    // Web: use a popup. Redirect sign-in is unreliable in modern browsers
+    // because third-party storage is blocked, which causes the login loop.
     if (kIsWeb) {
-      final GoogleAuthProvider googleProvider = GoogleAuthProvider();
-      googleProvider.addScope('email');
-      googleProvider.addScope('profile');
-      googleProvider.setCustomParameters({'prompt': 'select_account'});
-      await FirebaseAuth.instance.signInWithRedirect(googleProvider);
+      setState(() => _isLoading = true);
+      try {
+        final googleProvider = GoogleAuthProvider()
+          ..addScope('email')
+          ..addScope('profile')
+          ..setCustomParameters({'prompt': 'select_account'});
+
+        final UserCredential userCredential =
+            await FirebaseAuth.instance.signInWithPopup(googleProvider);
+        final String? email = userCredential.user?.email;
+        if (email != null) {
+          await _saveEmailToHistory(email);
+        }
+
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        _goToDashboard(email, 'google_user@tuiymet.com');
+      } on FirebaseAuthException catch (e) {
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        if (e.code != 'popup-closed-by-user' &&
+            e.code != 'cancelled-popup-request') {
+          _showMessageSnackBar('Google Sign-In Error: ${e.code}', isError: true);
+        }
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        _showMessageSnackBar('Google Sign-In Error: $e', isError: true);
+      }
       return;
     }
 
+    // Mobile (Android / iOS) Google Sign-In flow
     setState(() => _isLoading = true);
     try {
       UserCredential? userCredential;
-      // Mobile (Android / iOS) Google Sign-In Flow
       final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
       final GoogleSignInAuthentication? googleAuth = await googleUser?.authentication;
 
@@ -233,16 +225,7 @@ class LoginPageState extends State<LoginPage> {
       setState(() => _isLoading = false);
 
       if (userCredential != null) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => const MainNavigationScreen(),
-            settings: RouteSettings(arguments: {
-              'loginType': _selectedRole,
-              'email': email ?? 'google_user@tuiymet.com',
-            }),
-          ),
-        );
+        _goToDashboard(email, 'google_user@tuiymet.com');
       }
     } catch (e) {
       if (!mounted) return;
@@ -261,28 +244,52 @@ class LoginPageState extends State<LoginPage> {
       return;
     }
 
-    // On Web & PWA, trigger Apple redirect immediately
+    // Web: popup instead of redirect (see note in _handleGoogleSignIn)
     if (kIsWeb) {
-      final OAuthProvider appleProvider = OAuthProvider('apple.com');
-      appleProvider.addScope('email');
-      appleProvider.addScope('name');
-      await FirebaseAuth.instance.signInWithRedirect(appleProvider);
+      setState(() => _isLoading = true);
+      try {
+        final appleProvider = OAuthProvider('apple.com')
+          ..addScope('email')
+          ..addScope('name');
+
+        final UserCredential userCredential =
+            await FirebaseAuth.instance.signInWithPopup(appleProvider);
+        final String? email = userCredential.user?.email;
+        if (email != null) {
+          await _saveEmailToHistory(email);
+        }
+
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        _goToDashboard(email, 'apple_user@tuiymet.com');
+      } on FirebaseAuthException catch (e) {
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        if (e.code != 'popup-closed-by-user' &&
+            e.code != 'cancelled-popup-request') {
+          _showMessageSnackBar('Apple Sign-In Error: ${e.code}', isError: true);
+        }
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        _showMessageSnackBar('Apple Sign-In Error: $e', isError: true);
+      }
       return;
     }
 
+    // Native Mobile (iOS / macOS) Apple Sign-In flow
     setState(() => _isLoading = true);
     try {
-      // Native Mobile (iOS / macOS) Apple Sign-In Flow
       final appleResult = await SignInWithApple.getAppleIDCredential(
         scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
       );
 
-      final OAuthCredential credential = OAuthProvider("apple.com").credential(
+      final OAuthCredential credential = OAuthProvider('apple.com').credential(
         idToken: appleResult.identityToken,
         accessToken: appleResult.authorizationCode,
       );
 
-      final UserCredential userCredential = 
+      final UserCredential userCredential =
           await FirebaseAuth.instance.signInWithCredential(credential);
       final String? email = userCredential.user?.email ?? appleResult.email;
 
@@ -292,23 +299,14 @@ class LoginPageState extends State<LoginPage> {
 
       if (!mounted) return;
       setState(() => _isLoading = false);
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (context) => const MainNavigationScreen(),
-          settings: RouteSettings(arguments: {
-            'loginType': _selectedRole,
-            'email': email ?? 'apple_user@tuiymet.com',
-          }),
-        ),
-      );
+      _goToDashboard(email, 'apple_user@tuiymet.com');
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
       _showMessageSnackBar('Apple Sign-In Error: $e', isError: true);
     }
   }
+
   void _toggleAuthMode() {
     setState(() {
       _isSignUpMode = !_isSignUpMode;
@@ -408,7 +406,7 @@ class LoginPageState extends State<LoginPage> {
                       Row(
                         children: [
                           Text(
-                            _isSignUpMode ? "Already have an account? " : "Don't have an account? ",
+                            _isSignUpMode ? 'Already have an account? ' : "Don't have an account? ",
                             style: const TextStyle(color: Colors.black87, fontSize: 13),
                           ),
                           OutlinedButton(
@@ -735,13 +733,13 @@ class LoginPageState extends State<LoginPage> {
                                           label: _isSignUpMode
                                               ? 'Sign up with Google'
                                               : 'Continue with Google',
-                                          onPressed: _handleGoogleSignIn,
+                                          onPressed: _isLoading ? () {} : _handleGoogleSignIn,
                                         ),
                                         const SizedBox(height: 8),
                                         _SocialAuthButton(
                                           icon: Icons.apple,
                                           label: _isSignUpMode ? 'Sign up with Apple' : 'Continue with Apple',
-                                          onPressed: _handleAppleSignIn,
+                                          onPressed: _isLoading ? () {} : _handleAppleSignIn,
                                         ),
                                       ],
                                     ),
