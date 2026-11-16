@@ -1,16 +1,1 @@
-{
-  "hosting": {
-    "public": "build/web",
-    "ignore": [
-      "firebase.json",
-      "**/.*",
-      "**/node_modules/**"
-    ],
-    "rewrites": [
-      {
-        "source": "**",
-        "destination": "/index.html"
-      }
-    ]
-  }
-}
+{"hosting":{"public":"build/web","ignore":["firebase.json","**/.*","**/node_modules/**"],"rewrites":[{"source":"**","destination":"/index.html"}]},"flutter":{"platforms":{"android":{"default":{"projectId":"tuiymet-app-63ebd","appId":"1:136649269103:android:88ce8927580b13896cd29a","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"tuiymet-app-63ebd","configurations":{"android":"1:136649269103:android:88ce8927580b13896cd29a","ios":"1:136649269103:ios:d67f6fd3a3cc49fc6cd29a","macos":"1:136649269103:ios:d67f6fd3a3cc49fc6cd29a","web":"1:136649269103:web:67bbc2d0ff574d836cd29a","windows":"1:136649269103:web:d66e173e244a95d46cd29a"}}}}}}

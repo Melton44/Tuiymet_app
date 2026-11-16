@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "136649269103",
+    "project_id": "tuiymet-app-63ebd",
+    "storage_bucket": "tuiymet-app-63ebd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:136649269103:android:88ce8927580b13896cd29a",
+        "android_client_info": {
+          "package_name": "com.example.tuiymet_app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "136649269103-2i7tjgqqggblfb4uo6je2sao61g6s7gf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBtaO9NXO-ew5TOgBYIxEtwjqO7wjs3Nos"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "136649269103-2i7tjgqqggblfb4uo6je2sao61g6s7gf.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
 import 'theme.dart';
 
 import 'sheep_page.dart';
@@ -14,7 +16,11 @@ import 'admin_page.dart';
 import 'notes_page.dart';
 import 'nutrition_page.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
   runApp(const TuiymetApp());
 }
 
@@ -46,7 +52,6 @@ class MainNavigationScreen extends StatefulWidget {
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
 
-  // 1. Members Database with ranks
   final List<Map<String, dynamic>> _members = [
     {
       'memberNo': '01',
@@ -106,7 +111,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     },
   ];
 
-  // 2. Fully dynamic Admin-managed role-to-tile store initialized without hardcoded rules
   final Map<String, List<int>> _roleModuleAccess = {
     'Chairperson': [],
     'Secretary': [],
@@ -126,23 +130,24 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       'title': 'Monthly Group Meeting',
       'date': '2026-09-20',
       'content': 'Please remember our monthly meeting is scheduled for this Saturday at 10 AM.',
-    }
+    },
   ];
 
   double get _totalFunds {
     double total = 0;
-    for (var tx in _transactions) {
+    for (final tx in _transactions) {
+      final double amount = (tx['amount'] as num).toDouble();
       if (tx['isCredit'] == true) {
-        total += tx['amount'];
+        total += amount;
       } else {
-        total -= tx['amount'];
+        total -= amount;
       }
     }
     return total;
   }
 
   List<Map<String, String>> get _formattedMembersList {
-    return _members.map((m) {
+    return _members.map<Map<String, String>>((m) {
       return {
         'memberNo': m['memberNo']?.toString() ?? '',
         'name': m['name']?.toString() ?? '',
@@ -177,28 +182,36 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       activeRole = 'Admin';
       isGranted = true;
     } else if (userQuery.isNotEmpty) {
-      final matchedUser = _members.firstWhere(
+      final Map<String, dynamic> matchedUser = _members.firstWhere(
         (m) {
           final name = (m['name'] ?? '').toString().toLowerCase();
           final email = (m['email'] ?? '').toString().toLowerCase();
           final rank = (m['rank'] ?? '').toString().toLowerCase();
-          return name.contains(userQuery) || email.contains(userQuery) || rank.contains(userQuery);
+          return name.contains(userQuery) ||
+              email.contains(userQuery) ||
+              rank.contains(userQuery);
         },
-        orElse: () => _members.firstWhere((m) => m['rank'] == 'Member', orElse: () => _members.last),
+        orElse: () => _members.firstWhere(
+          (m) => m['rank'] == 'Member',
+          orElse: () => _members.last,
+        ),
       );
 
-      activeRole = matchedUser['rank'] ?? 'Member';
-      isGranted = matchedUser['isGranted'] ?? true;
+      activeRole = matchedUser['rank'] as String? ?? 'Member';
+      isGranted = matchedUser['isGranted'] as bool? ?? true;
     } else {
-      final defaultUser = _members.firstWhere((m) => m['rank'] == 'Member', orElse: () => _members.last);
-      activeRole = defaultUser['rank'] ?? 'Member';
-      isGranted = defaultUser['isGranted'] ?? true;
+      final Map<String, dynamic> defaultUser = _members.firstWhere(
+        (m) => m['rank'] == 'Member',
+        orElse: () => _members.last,
+      );
+      activeRole = defaultUser['rank'] as String? ?? 'Member';
+      isGranted = defaultUser['isGranted'] as bool? ?? true;
     }
 
-    // Pulls strictly what the Admin has chosen for this role. If Admin checked nothing, list is empty []
-    final List<int> currentActiveIndexes = _roleModuleAccess[activeRole] ?? [];
+    final List<int> currentActiveIndexes =
+        _roleModuleAccess[activeRole] ?? <int>[];
 
-    final List<Widget> pages = [
+    final pages = <Widget>[
       DashboardPage(
         memberCount: _members.length,
         totalFunds: _totalFunds,
@@ -222,9 +235,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         },
         onAddRole: (newRole) {
           setState(() {
-            if (!_roleModuleAccess.containsKey(newRole)) {
-              _roleModuleAccess[newRole] = []; // Admin starts with clean slate for new roles
-            }
+            _roleModuleAccess.putIfAbsent(newRole, () => <int>[]);
           });
         },
       ),
@@ -232,25 +243,26 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         members: _formattedMembersList,
         announcements: _announcements,
         onAddMember: (member) => setState(() => _members.add(member)),
-        onUpdateMember: (index, updatedMember) => setState(() => _members[index] = updatedMember),
+        onUpdateMember: (index, updatedMember) =>
+            setState(() => _members[index] = updatedMember),
         onDeleteMember: (index) => setState(() => _members.removeAt(index)),
-        onPostAnnouncement: (announcement) => setState(() => _announcements.insert(0, announcement)),
+        onPostAnnouncement: (announcement) =>
+            setState(() => _announcements.insert(0, announcement)),
       ),
       TreasurerPage(
         transactions: _transactions,
         totalFunds: _totalFunds,
         onAddTransaction: (tx) => setState(() => _transactions.insert(0, tx)),
       ),
-      const MembersViewPage(
-
-      ),
+      const MembersViewPage(),
       SheepPage(),
       VetPage(
-        onPostAnnouncement: (announcement) => setState(() => _announcements.insert(0, announcement)),
+        onPostAnnouncement: (announcement) =>
+            setState(() => _announcements.insert(0, announcement)),
       ),
       const healthRecordsPage(),
       const BreedingPage(),
-      const NotesPage(), // Index 9
+      const NotesPage(),
       const NutritionPage(),
     ];
 
@@ -302,7 +314,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
                       Row(
                         children: [
                           Chip(
-                            label: Text(activeRole, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                            label: Text(
+                              activeRole,
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                            ),
                             backgroundColor: const Color(0xFF1B5E20).withValues(alpha: 0.12),
                           ),
                           const SizedBox(width: 8),
