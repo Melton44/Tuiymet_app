@@ -189,7 +189,7 @@ class LoginPageState extends State<LoginPage> {
     }
   }
 
-  Future<void> _handleGoogleSignIn() async {
+ Future<void> _handleGoogleSignIn() async {
     // Guard against unsupported desktop platforms (Windows, Linux)
     if (!kIsWeb && (Platform.isWindows || Platform.isLinux)) {
       _showMessageSnackBar(
@@ -199,35 +199,32 @@ class LoginPageState extends State<LoginPage> {
       return;
     }
 
+    // On Web & PWA, trigger redirect immediately without popup/try-catch interference
+    if (kIsWeb) {
+      final GoogleAuthProvider googleProvider = GoogleAuthProvider();
+      googleProvider.addScope('email');
+      googleProvider.addScope('profile');
+      googleProvider.setCustomParameters({'prompt': 'select_account'});
+      await FirebaseAuth.instance.signInWithRedirect(googleProvider);
+      return;
+    }
+
     setState(() => _isLoading = true);
     try {
       UserCredential? userCredential;
+      // Mobile (Android / iOS) Google Sign-In Flow
+      final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
+      final GoogleSignInAuthentication? googleAuth = await googleUser?.authentication;
 
-      if (kIsWeb) {
-        // Web & PWA: Use redirect to bypass popup blocking and interop crashes
-        final GoogleAuthProvider googleProvider = GoogleAuthProvider();
-        googleProvider.addScope('email');
-        googleProvider.addScope('profile');
-        googleProvider.setCustomParameters({'prompt': 'select_account'});
-
-        await FirebaseAuth.instance.signInWithRedirect(googleProvider);
-        return; // Page redirects to Google
-      } else {
-        // Mobile (Android / iOS) Google Sign-In Flow
-        final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
-        final GoogleSignInAuthentication? googleAuth = await googleUser?.authentication;
-
-        if (googleAuth != null) {
-          final credential = GoogleAuthProvider.credential(
-            accessToken: googleAuth.accessToken,
-            idToken: googleAuth.idToken,
-          );
-          userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
-        }
+      if (googleAuth != null) {
+        final credential = GoogleAuthProvider.credential(
+          accessToken: googleAuth.accessToken,
+          idToken: googleAuth.idToken,
+        );
+        userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
       }
 
       final String? email = userCredential?.user?.email;
-
       if (email != null) {
         await _saveEmailToHistory(email);
       }
@@ -264,49 +261,48 @@ class LoginPageState extends State<LoginPage> {
       return;
     }
 
+    // On Web & PWA, trigger Apple redirect immediately
+    if (kIsWeb) {
+      final OAuthProvider appleProvider = OAuthProvider('apple.com');
+      appleProvider.addScope('email');
+      appleProvider.addScope('name');
+      await FirebaseAuth.instance.signInWithRedirect(appleProvider);
+      return;
+    }
+
     setState(() => _isLoading = true);
     try {
-      if (kIsWeb) {
-        // Web & PWA: Use redirect for Apple Sign-In
-        final OAuthProvider appleProvider = OAuthProvider('apple.com');
-        appleProvider.addScope('email');
-        appleProvider.addScope('name');
+      // Native Mobile (iOS / macOS) Apple Sign-In Flow
+      final appleResult = await SignInWithApple.getAppleIDCredential(
+        scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
+      );
 
-        await FirebaseAuth.instance.signInWithRedirect(appleProvider);
-        return; // Page redirects to Apple
-      } else {
-        // Native Mobile (iOS / macOS) Apple Sign-In Flow
-        final appleResult = await SignInWithApple.getAppleIDCredential(
-          scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
-        );
+      final OAuthCredential credential = OAuthProvider("apple.com").credential(
+        idToken: appleResult.identityToken,
+        accessToken: appleResult.authorizationCode,
+      );
 
-        final OAuthCredential credential = OAuthProvider("apple.com").credential(
-          idToken: appleResult.identityToken,
-          accessToken: appleResult.authorizationCode,
-        );
+      final UserCredential userCredential = 
+          await FirebaseAuth.instance.signInWithCredential(credential);
+      final String? email = userCredential.user?.email ?? appleResult.email;
 
-        final UserCredential userCredential = 
-            await FirebaseAuth.instance.signInWithCredential(credential);
-        final String? email = userCredential.user?.email ?? appleResult.email;
-
-        if (email != null) {
-          await _saveEmailToHistory(email);
-        }
-
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => const MainNavigationScreen(),
-            settings: RouteSettings(arguments: {
-              'loginType': _selectedRole,
-              'email': email ?? 'apple_user@tuiymet.com',
-            }),
-          ),
-        );
+      if (email != null) {
+        await _saveEmailToHistory(email);
       }
+
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (context) => const MainNavigationScreen(),
+          settings: RouteSettings(arguments: {
+            'loginType': _selectedRole,
+            'email': email ?? 'apple_user@tuiymet.com',
+          }),
+        ),
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
