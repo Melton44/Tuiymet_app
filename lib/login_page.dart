@@ -29,6 +29,7 @@ class LoginPageState extends State<LoginPage> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _confirmPasswordController = TextEditingController();
+  final FocusNode _emailFocusNode = FocusNode();
 
   List<String> _recentEmails = [];
 
@@ -42,6 +43,33 @@ class LoginPageState extends State<LoginPage> {
   void initState() {
     super.initState();
     _loadSavedPreferences();
+    _checkRedirectSignIn();
+  }
+
+  Future<void> _checkRedirectSignIn() async {
+    if (!kIsWeb) return;
+    try {
+      final UserCredential result = await FirebaseAuth.instance.getRedirectResult();
+      if (result.user != null && mounted) {
+        final String? email = result.user?.email;
+        if (email != null) {
+          await _saveEmailToHistory(email);
+        }
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => const MainNavigationScreen(),
+            settings: RouteSettings(arguments: {
+              'loginType': _selectedRole,
+              'email': email ?? 'user@tuiymet.com',
+            }),
+          ),
+        );
+      }
+    } catch (_) {
+      // Ignore if no pending redirect sign-in exists
+    }
   }
 
   Future<void> _loadSavedPreferences() async {
@@ -161,7 +189,7 @@ class LoginPageState extends State<LoginPage> {
     }
   }
 
- Future<void> _handleGoogleSignIn() async {
+  Future<void> _handleGoogleSignIn() async {
     // Guard against unsupported desktop platforms (Windows, Linux)
     if (!kIsWeb && (Platform.isWindows || Platform.isLinux)) {
       _showMessageSnackBar(
@@ -176,9 +204,19 @@ class LoginPageState extends State<LoginPage> {
       UserCredential? userCredential;
 
       if (kIsWeb) {
-        // Web Google Sign-In Flow
-        GoogleAuthProvider googleProvider = GoogleAuthProvider();
-        userCredential = await FirebaseAuth.instance.signInWithPopup(googleProvider);
+        // Web & PWA Google Sign-In Flow
+        final GoogleAuthProvider googleProvider = GoogleAuthProvider();
+        googleProvider.addScope('email');
+        googleProvider.addScope('profile');
+        googleProvider.setCustomParameters({'prompt': 'select_account'});
+
+        try {
+          userCredential = await FirebaseAuth.instance.signInWithPopup(googleProvider);
+        } catch (_) {
+          // Fallback to redirect if running inside an installed PWA or popup blocker
+          await FirebaseAuth.instance.signInWithRedirect(googleProvider);
+          return;
+        }
       } else {
         // Mobile (Android / iOS) Google Sign-In Flow
         final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
@@ -213,8 +251,6 @@ class LoginPageState extends State<LoginPage> {
             }),
           ),
         );
-      } else {
-        setState(() => _isLoading = false);
       }
     } catch (e) {
       if (!mounted) return;
@@ -235,18 +271,37 @@ class LoginPageState extends State<LoginPage> {
 
     setState(() => _isLoading = true);
     try {
-      final appleResult = await SignInWithApple.getAppleIDCredential(
-        scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
-      );
+      UserCredential? userCredential;
+      String? appleEmail;
 
-      final OAuthCredential credential = OAuthProvider("apple.com").credential(
-        idToken: appleResult.identityToken,
-        accessToken: appleResult.authorizationCode,
-      );
+      if (kIsWeb) {
+        // Web & PWA Apple Sign-In Flow via Firebase OAuthProvider
+        final OAuthProvider appleProvider = OAuthProvider('apple.com');
+        appleProvider.addScope('email');
+        appleProvider.addScope('name');
 
-      final UserCredential userCredential = 
-          await FirebaseAuth.instance.signInWithCredential(credential);
-      final String? email = userCredential.user?.email ?? appleResult.email;
+        try {
+          userCredential = await FirebaseAuth.instance.signInWithPopup(appleProvider);
+        } catch (_) {
+          await FirebaseAuth.instance.signInWithRedirect(appleProvider);
+          return;
+        }
+      } else {
+        // Native Mobile (iOS / macOS) Apple Sign-In Flow
+        final appleResult = await SignInWithApple.getAppleIDCredential(
+          scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
+        );
+
+        final OAuthCredential credential = OAuthProvider("apple.com").credential(
+          idToken: appleResult.identityToken,
+          accessToken: appleResult.authorizationCode,
+        );
+
+        userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
+        appleEmail = appleResult.email;
+      }
+
+      final String? email = userCredential?.user?.email ?? appleEmail;
 
       if (email != null) {
         await _saveEmailToHistory(email);
@@ -255,16 +310,18 @@ class LoginPageState extends State<LoginPage> {
       if (!mounted) return;
       setState(() => _isLoading = false);
 
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (context) => const MainNavigationScreen(),
-          settings: RouteSettings(arguments: {
-            'loginType': _selectedRole,
-            'email': email ?? 'apple_user@tuiymet.com',
-          }),
-        ),
-      );
+      if (userCredential != null) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => const MainNavigationScreen(),
+            settings: RouteSettings(arguments: {
+              'loginType': _selectedRole,
+              'email': email ?? 'apple_user@tuiymet.com',
+            }),
+          ),
+        );
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
@@ -295,6 +352,7 @@ class LoginPageState extends State<LoginPage> {
     _emailController.dispose();
     _passwordController.dispose();
     _confirmPasswordController.dispose();
+    _emailFocusNode.dispose();
     super.dispose();
   }
 
@@ -492,7 +550,7 @@ class LoginPageState extends State<LoginPage> {
                                         // Email Autocomplete Field
                                         RawAutocomplete<String>(
                                           textEditingController: _emailController,
-                                          focusNode: FocusNode(),
+                                          focusNode: _emailFocusNode,
                                           optionsBuilder: (TextEditingValue textEditingValue) {
                                             if (_recentEmails.isEmpty) {
                                               return const Iterable<String>.empty();
