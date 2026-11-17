@@ -1,10 +1,9 @@
-import 'dart:convert';
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'main.dart';
@@ -32,12 +31,6 @@ class LoginPageState extends State<LoginPage> {
   final FocusNode _emailFocusNode = FocusNode();
 
   List<String> _recentEmails = [];
-
-  String get _baseUrl {
-    return 'https://tuiymet-backend-tfszqr4nca-bq.a.run.app';
-  }
-
-  String get _authEndpoint => '$_baseUrl/api/register_or_login';
 
   @override
   void initState() {
@@ -87,23 +80,84 @@ class LoginPageState extends State<LoginPage> {
     return RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(email);
   }
 
-  /// Single place that opens the dashboard after any successful sign-in.
-  void _goToDashboard(String? email, String fallbackEmail) {
+  // ---------- Firestore user record ----------
+
+  /// Makes sure users/{uid} exists. New accounts are always 'Member'.
+  /// Returns the stored role.
+  Future<String> _ensureUserRecord(User user) async {
+    final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    final snap = await ref.get();
+    if (snap.exists) {
+      return (snap.data()?['role'] as String?) ?? 'Member';
+    }
+    await ref.set({
+      'email': user.email?.toLowerCase(),
+      'role': 'Member',
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+    return 'Member';
+  }
+
+  void _goToDashboard(String email, String role) {
     if (!mounted) return;
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
         builder: (context) => const MainNavigationScreen(),
         settings: RouteSettings(arguments: {
-          'loginType': _selectedRole,
-          'email': email ?? fallbackEmail,
+          'loginType': role,
+          'email': email,
         }),
       ),
     );
   }
 
+  /// Shared finish step for email, Google and Apple sign-in.
+  /// Rejects people who try to LOG IN without having signed up first.
+  Future<void> _completeSignIn(User? user, {required bool isNewUser}) async {
+    if (user == null || user.email == null) {
+      await FirebaseAuth.instance.signOut();
+      if (mounted) setState(() => _isLoading = false);
+      _showMessageSnackBar('Could not get an email from this account.', isError: true);
+      return;
+    }
+    final email = user.email!;
+
+    // Social login on a brand-new account while in Log In mode:
+    // remove the auto-created account and ask them to sign up.
+    if (!_isSignUpMode && isNewUser) {
+      try {
+        await user.delete();
+      } catch (_) {}
+      await FirebaseAuth.instance.signOut();
+      if (mounted) setState(() => _isLoading = false);
+      _showMessageSnackBar(
+        '$email is not registered. Please tap Sign Up to create an account first.',
+        isError: true,
+      );
+      return;
+    }
+
+    final storedRole = await _ensureUserRecord(user);
+
+    // Role chosen in the dropdown must match the stored role
+    if (!_isSignUpMode && _selectedRole == 'Admin' && storedRole != 'Admin') {
+      await FirebaseAuth.instance.signOut();
+      if (mounted) setState(() => _isLoading = false);
+      _showMessageSnackBar('This account does not have Administrator access.', isError: true);
+      return;
+    }
+
+    await _saveEmailToHistory(email);
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+    _goToDashboard(email, storedRole);
+  }
+
+  // ---------- Email + password ----------
+
   Future<void> _handleAuthentication() async {
-    final email = _emailController.text.trim();
+    final email = _emailController.text.trim().toLowerCase();
     final password = _passwordController.text.trim();
     final confirmPassword = _confirmPasswordController.text.trim();
 
@@ -111,12 +165,14 @@ class LoginPageState extends State<LoginPage> {
       _showMessageSnackBar('Please fill in all required fields.', isError: true);
       return;
     }
-
     if (!_isValidEmail(email)) {
       _showMessageSnackBar('Please enter a valid email address.', isError: true);
       return;
     }
-
+    if (_isSignUpMode && password.length < 6) {
+      _showMessageSnackBar('Password must be at least 6 characters.', isError: true);
+      return;
+    }
     if (_isSignUpMode && password != confirmPassword) {
       _showMessageSnackBar('Passwords do not match.', isError: true);
       return;
@@ -125,107 +181,99 @@ class LoginPageState extends State<LoginPage> {
     setState(() => _isLoading = true);
 
     try {
-      final response = await http.post(
-        Uri.parse(_authEndpoint),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'email': email,
-          'password': password,
-          'role': _selectedRole,
-          'action': _isSignUpMode ? 'register' : 'login',
-        }),
-      );
+      final auth = FirebaseAuth.instance;
+      final UserCredential cred = _isSignUpMode
+          ? await auth.createUserWithEmailAndPassword(email: email, password: password)
+          : await auth.signInWithEmailAndPassword(email: email, password: password);
 
+      await _completeSignIn(cred.user, isNewUser: false);
+    } on FirebaseAuthException catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
-
-      if (response.statusCode == 200 || response.statusCode == 201) {
-        await _saveEmailToHistory(email);
-        _goToDashboard(email, email);
-      } else {
-        final data = jsonDecode(response.body);
-        _showMessageSnackBar(data['message'] ?? 'Authentication failed.', isError: true);
-      }
+      _showMessageSnackBar(_authErrorMessage(e), isError: true);
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
-
-      // Offline Demo Fallback
-      await _saveEmailToHistory(email);
-      _goToDashboard(email, email);
+      _showMessageSnackBar('Something went wrong: $e', isError: true);
     }
   }
 
+  String _authErrorMessage(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'email-already-in-use':
+        return 'This email is already registered. Please Sign In instead.';
+      case 'weak-password':
+        return 'Password is too weak. Use at least 6 characters.';
+      case 'invalid-email':
+        return 'Please enter a valid email address.';
+      case 'user-not-found':
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'Incorrect email or password, or this email is not registered. Please Sign Up first.';
+      case 'too-many-requests':
+        return 'Too many attempts. Please try again later.';
+      case 'network-request-failed':
+        return 'No internet connection.';
+      default:
+        return 'Authentication failed: ${e.code}';
+    }
+  }
+
+  Future<void> _handlePasswordReset() async {
+    final email = _emailController.text.trim();
+    if (!_isValidEmail(email)) {
+      _showMessageSnackBar('Enter your email above first.', isError: true);
+      return;
+    }
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      _showMessageSnackBar('If this email is registered, a reset link has been sent.');
+    } on FirebaseAuthException catch (e) {
+      _showMessageSnackBar(_authErrorMessage(e), isError: true);
+    }
+  }
+
+  // ---------- Google ----------
+
   Future<void> _handleGoogleSignIn() async {
-    // Guard against unsupported desktop platforms (Windows, Linux)
     if (!kIsWeb && (Platform.isWindows || Platform.isLinux)) {
-      _showMessageSnackBar(
-        'Google Sign-In is supported on Android, iOS, and Web.',
-        isError: true,
-      );
+      _showMessageSnackBar('Google Sign-In is supported on Android, iOS, and Web.', isError: true);
       return;
     }
 
-    // Web: use a popup. Redirect sign-in is unreliable in modern browsers
-    // because third-party storage is blocked, which causes the login loop.
-    if (kIsWeb) {
-      setState(() => _isLoading = true);
-      try {
-        final googleProvider = GoogleAuthProvider()
+    setState(() => _isLoading = true);
+    try {
+      UserCredential? cred;
+
+      if (kIsWeb) {
+        final provider = GoogleAuthProvider()
           ..addScope('email')
           ..addScope('profile')
           ..setCustomParameters({'prompt': 'select_account'});
-
-        final UserCredential userCredential =
-            await FirebaseAuth.instance.signInWithPopup(googleProvider);
-        final String? email = userCredential.user?.email;
-        if (email != null) {
-          await _saveEmailToHistory(email);
+        cred = await FirebaseAuth.instance.signInWithPopup(provider);
+      } else {
+        final googleUser = await GoogleSignIn().signIn();
+        final googleAuth = await googleUser?.authentication;
+        if (googleAuth == null) {
+          if (mounted) setState(() => _isLoading = false);
+          return; // user cancelled
         }
-
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        _goToDashboard(email, 'google_user@tuiymet.com');
-      } on FirebaseAuthException catch (e) {
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        if (e.code != 'popup-closed-by-user' &&
-            e.code != 'cancelled-popup-request') {
-          _showMessageSnackBar('Google Sign-In Error: ${e.code}', isError: true);
-        }
-      } catch (e) {
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        _showMessageSnackBar('Google Sign-In Error: $e', isError: true);
-      }
-      return;
-    }
-
-    // Mobile (Android / iOS) Google Sign-In flow
-    setState(() => _isLoading = true);
-    try {
-      UserCredential? userCredential;
-      final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
-      final GoogleSignInAuthentication? googleAuth = await googleUser?.authentication;
-
-      if (googleAuth != null) {
         final credential = GoogleAuthProvider.credential(
           accessToken: googleAuth.accessToken,
           idToken: googleAuth.idToken,
         );
-        userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
+        cred = await FirebaseAuth.instance.signInWithCredential(credential);
       }
 
-      final String? email = userCredential?.user?.email;
-      if (email != null) {
-        await _saveEmailToHistory(email);
-      }
-
+      await _completeSignIn(
+        cred.user,
+        isNewUser: cred.additionalUserInfo?.isNewUser ?? false,
+      );
+    } on FirebaseAuthException catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
-
-      if (userCredential != null) {
-        _goToDashboard(email, 'google_user@tuiymet.com');
+      if (e.code != 'popup-closed-by-user' && e.code != 'cancelled-popup-request') {
+        _showMessageSnackBar('Google Sign-In Error: ${e.code}', isError: true);
       }
     } catch (e) {
       if (!mounted) return;
@@ -234,72 +282,44 @@ class LoginPageState extends State<LoginPage> {
     }
   }
 
+  // ---------- Apple ----------
+
   Future<void> _handleAppleSignIn() async {
-    // Guard against unsupported desktop platforms (Windows, Linux)
     if (!kIsWeb && (Platform.isWindows || Platform.isLinux)) {
-      _showMessageSnackBar(
-        'Apple Sign-In is supported on iOS, macOS, and Web.',
-        isError: true,
-      );
+      _showMessageSnackBar('Apple Sign-In is supported on iOS, macOS, and Web.', isError: true);
       return;
     }
 
-    // Web: popup instead of redirect (see note in _handleGoogleSignIn)
-    if (kIsWeb) {
-      setState(() => _isLoading = true);
-      try {
-        final appleProvider = OAuthProvider('apple.com')
-          ..addScope('email')
-          ..addScope('name');
-
-        final UserCredential userCredential =
-            await FirebaseAuth.instance.signInWithPopup(appleProvider);
-        final String? email = userCredential.user?.email;
-        if (email != null) {
-          await _saveEmailToHistory(email);
-        }
-
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        _goToDashboard(email, 'apple_user@tuiymet.com');
-      } on FirebaseAuthException catch (e) {
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        if (e.code != 'popup-closed-by-user' &&
-            e.code != 'cancelled-popup-request') {
-          _showMessageSnackBar('Apple Sign-In Error: ${e.code}', isError: true);
-        }
-      } catch (e) {
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        _showMessageSnackBar('Apple Sign-In Error: $e', isError: true);
-      }
-      return;
-    }
-
-    // Native Mobile (iOS / macOS) Apple Sign-In flow
     setState(() => _isLoading = true);
     try {
-      final appleResult = await SignInWithApple.getAppleIDCredential(
-        scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
-      );
+      UserCredential cred;
 
-      final OAuthCredential credential = OAuthProvider('apple.com').credential(
-        idToken: appleResult.identityToken,
-        accessToken: appleResult.authorizationCode,
-      );
-
-      final UserCredential userCredential =
-          await FirebaseAuth.instance.signInWithCredential(credential);
-      final String? email = userCredential.user?.email ?? appleResult.email;
-
-      if (email != null) {
-        await _saveEmailToHistory(email);
+      if (kIsWeb) {
+        final provider = OAuthProvider('apple.com')
+          ..addScope('email')
+          ..addScope('name');
+        cred = await FirebaseAuth.instance.signInWithPopup(provider);
+      } else {
+        final appleResult = await SignInWithApple.getAppleIDCredential(
+          scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
+        );
+        final credential = OAuthProvider('apple.com').credential(
+          idToken: appleResult.identityToken,
+          accessToken: appleResult.authorizationCode,
+        );
+        cred = await FirebaseAuth.instance.signInWithCredential(credential);
       }
 
+      await _completeSignIn(
+        cred.user,
+        isNewUser: cred.additionalUserInfo?.isNewUser ?? false,
+      );
+    } on FirebaseAuthException catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
-      _goToDashboard(email, 'apple_user@tuiymet.com');
+      if (e.code != 'popup-closed-by-user' && e.code != 'cancelled-popup-request') {
+        _showMessageSnackBar('Apple Sign-In Error: ${e.code}', isError: true);
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);
@@ -310,6 +330,7 @@ class LoginPageState extends State<LoginPage> {
   void _toggleAuthMode() {
     setState(() {
       _isSignUpMode = !_isSignUpMode;
+      _selectedRole = 'Member';
       _passwordController.clear();
       _confirmPasswordController.clear();
     });
@@ -355,7 +376,6 @@ class LoginPageState extends State<LoginPage> {
               padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
               child: Column(
                 children: [
-                  // Top Header Navigation
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -427,8 +447,6 @@ class LoginPageState extends State<LoginPage> {
                       ),
                     ],
                   ),
-
-                  // Content Body
                   Expanded(
                     child: Center(
                       child: SingleChildScrollView(
@@ -463,8 +481,6 @@ class LoginPageState extends State<LoginPage> {
                                   ),
                                 ),
                                 const SizedBox(width: 40, height: 20),
-
-                                // Auth Card
                                 Expanded(
                                   flex: isMobile ? 0 : 4,
                                   child: Container(
@@ -498,8 +514,6 @@ class LoginPageState extends State<LoginPage> {
                                           style: TextStyle(color: Colors.black54, fontSize: 13),
                                         ),
                                         const SizedBox(height: 16),
-
-                                        // Role Selector (Admin vs Member Only)
                                         DropdownButtonFormField<String>(
                                           value: _selectedRole,
                                           items: _roles.map((role) {
@@ -524,8 +538,6 @@ class LoginPageState extends State<LoginPage> {
                                           ),
                                         ),
                                         const SizedBox(height: 12),
-
-                                        // Email Autocomplete Field
                                         RawAutocomplete<String>(
                                           textEditingController: _emailController,
                                           focusNode: _emailFocusNode,
@@ -591,8 +603,6 @@ class LoginPageState extends State<LoginPage> {
                                           },
                                         ),
                                         const SizedBox(height: 12),
-
-                                        // Password Field
                                         TextField(
                                           controller: _passwordController,
                                           obscureText: _obscurePassword,
@@ -615,7 +625,6 @@ class LoginPageState extends State<LoginPage> {
                                             ),
                                           ),
                                         ),
-
                                         if (_isSignUpMode) ...[
                                           const SizedBox(height: 12),
                                           TextField(
@@ -641,9 +650,7 @@ class LoginPageState extends State<LoginPage> {
                                             ),
                                           ),
                                         ],
-
                                         const SizedBox(height: 6),
-
                                         if (!_isSignUpMode)
                                           Row(
                                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -664,17 +671,13 @@ class LoginPageState extends State<LoginPage> {
                                                 ],
                                               ),
                                               TextButton(
-                                                onPressed: () {
-                                                  _showMessageSnackBar('Password reset link sent.');
-                                                },
+                                                onPressed: _handlePasswordReset,
                                                 child: const Text('Forgot password?',
                                                     style: TextStyle(color: primaryGreen, fontSize: 13)),
                                               ),
                                             ],
                                           ),
-
                                         const SizedBox(height: 12),
-
                                         SizedBox(
                                           width: double.infinity,
                                           height: 44,
@@ -714,7 +717,6 @@ class LoginPageState extends State<LoginPage> {
                                           ),
                                         ),
                                         const SizedBox(height: 14),
-
                                         Row(
                                           children: const [
                                             Expanded(child: Divider()),
@@ -727,7 +729,6 @@ class LoginPageState extends State<LoginPage> {
                                           ],
                                         ),
                                         const SizedBox(height: 14),
-
                                         _SocialAuthButton(
                                           icon: Icons.g_mobiledata,
                                           label: _isSignUpMode
@@ -752,8 +753,6 @@ class LoginPageState extends State<LoginPage> {
                       ),
                     ),
                   ),
-
-                  // Bottom Features Footer
                   Padding(
                     padding: const EdgeInsets.only(top: 10),
                     child: Wrap(
