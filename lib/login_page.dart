@@ -85,17 +85,23 @@ class LoginPageState extends State<LoginPage> {
   /// Makes sure users/{uid} exists. New accounts are always 'Member'.
   /// Returns the stored role.
   Future<String> _ensureUserRecord(User user) async {
-    final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
-    final snap = await ref.get();
-    if (snap.exists) {
-      return (snap.data()?['role'] as String?) ?? 'Member';
+    try {
+      final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
+      final snap = await ref.get();
+      if (snap.exists) {
+        return (snap.data()?['role'] as String?) ?? 'Member';
+      }
+      await ref.set({
+        'email': user.email?.toLowerCase(),
+        'role': 'Member',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      return 'Member';
+    } catch (e) {
+      // Firestore unreachable: don't block sign-in, fall back to Member.
+      debugPrint('Firestore unavailable: $e');
+      return 'Member';
     }
-    await ref.set({
-      'email': user.email?.toLowerCase(),
-      'role': 'Member',
-      'createdAt': FieldValue.serverTimestamp(),
-    });
-    return 'Member';
   }
 
   void _goToDashboard(String email, String role) {
@@ -515,7 +521,8 @@ class LoginPageState extends State<LoginPage> {
                                         ),
                                         const SizedBox(height: 16),
                                         DropdownButtonFormField<String>(
-                                          value: _selectedRole,
+                                          key: ValueKey(_isSignUpMode),
+                                          initialValue: _selectedRole,
                                           items: _roles.map((role) {
                                             return DropdownMenuItem(
                                               value: role,
