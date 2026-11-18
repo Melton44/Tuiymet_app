@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -72,91 +73,23 @@ class MainNavigationScreen extends StatefulWidget {
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
 
-  String _storedRole = 'Member';
+  // ---- Live data from Firestore ----
+  String _storedRole = 'Member'; // 'Admin' or 'Member' (access type)
+  String _position = 'Member'; // Chairperson, Secretary, Treasurer, Vet, Member
+  bool _isGranted = false; // set by the admin
   bool _roleLoaded = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _loadStoredRole();
-  }
+  // ---- New member notifications ----
+  final Set<String> _knownPendingUids = {};
+  bool _usersInitialized = false;
 
-  /// Reads this account's role from Firestore (users/{uid}).
-  Future<void> _loadStoredRole() async {
-    try {
-      final uid = FirebaseAuth.instance.currentUser?.uid;
-      if (uid != null) {
-        final snap = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(uid)
-            .get();
-        _storedRole = (snap.data()?['role'] as String?) ?? 'Member';
-      }
-    } catch (_) {
-      // Firestore unreachable: stay on Member
-    }
-    if (mounted) setState(() => _roleLoaded = true);
-  }
+  bool get _canSeeNotifications =>
+      _storedRole == 'Admin' || _position == 'Secretary';
 
-  final List<Map<String, dynamic>> _members = [
-    {
-      'memberNo': '01',
-      'name': 'Vincent',
-      'email': 'vincent@gmail.com',
-      'id': '1087426',
-      'phone': '0712345678',
-      'flockSize': '24',
-      'location': 'Tuiymet',
-      'farmNo': '01',
-      'gender': 'Male',
-      'rank': 'Chairperson',
-      'isGranted': true,
-      'hasPendingRequest': false,
-    },
-    {
-      'memberNo': '02',
-      'name': 'Stacey',
-      'email': 'stacey@gmail.com',
-      'id': '4532172',
-      'phone': '0723456789',
-      'flockSize': '18',
-      'location': 'Tuiymet',
-      'farmNo': '03',
-      'gender': 'Female',
-      'rank': 'Treasurer',
-      'isGranted': true,
-      'hasPendingRequest': false,
-    },
-    {
-      'memberNo': '03',
-      'name': 'Melton',
-      'email': 'melton@gmail.com',
-      'id': '65376728',
-      'phone': '0734567890',
-      'flockSize': '30',
-      'location': 'Tuiymet',
-      'farmNo': '05',
-      'gender': 'Male',
-      'rank': 'Secretary',
-      'isGranted': true,
-      'hasPendingRequest': false,
-    },
-    {
-      'memberNo': '04',
-      'name': 'Kiprono',
-      'email': 'kiprono@gmail.com',
-      'id': '54321098',
-      'phone': '0745678901',
-      'flockSize': '12',
-      'location': 'Tuiymet',
-      'farmNo': '08',
-      'gender': 'Male',
-      'rank': 'Member',
-      'isGranted': true,
-      'hasPendingRequest': false,
-    },
-  ];
+  /// Everyone who signed up (admins excluded). Filled from users/{uid}.
+  List<Map<String, dynamic>> _members = [];
 
+  /// role -> list of dashboard tile indexes. Saved in config/roleAccess.
   final Map<String, List<int>> _roleModuleAccess = {
     'Chairperson': [],
     'Secretary': [],
@@ -164,6 +97,160 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     'Vet': [],
     'Member': [],
   };
+
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _ownSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _usersSub;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _accessSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _startListening();
+  }
+
+  @override
+  void dispose() {
+    _ownSub?.cancel();
+    _usersSub?.cancel();
+    _accessSub?.cancel();
+    super.dispose();
+  }
+
+  void _startListening() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _roleLoaded = true;
+      return;
+    }
+    final db = FirebaseFirestore.instance;
+
+    // 1. This account's own record (role, position, access granted)
+    _ownSub = db.collection('users').doc(user.uid).snapshots().listen(
+      (snap) {
+        final d = snap.data();
+        if (!mounted) return;
+        setState(() {
+          _storedRole = (d?['role'] as String?) ?? 'Member';
+          _position = (d?['position'] as String?) ?? 'Member';
+          _isGranted = (d?['isGranted'] as bool?) ?? false;
+          _roleLoaded = true;
+        });
+      },
+      onError: (_) {
+        if (mounted) setState(() => _roleLoaded = true);
+      },
+    );
+
+    // 2. Everyone who has signed up
+    _usersSub = db.collection('users').snapshots().listen(
+      (snap) {
+        final list = <Map<String, dynamic>>[];
+        for (final doc in snap.docs) {
+          final d = doc.data();
+          if ((d['role'] ?? 'Member') == 'Admin') continue;
+          final email = (d['email'] ?? '').toString();
+          final granted = (d['isGranted'] as bool?) ?? false;
+          list.add({
+            'uid': doc.id,
+            'name': (d['name'] ??
+                    (email.contains('@') ? email.split('@').first : 'Member'))
+                .toString(),
+            'email': email,
+            'id': (d['idNumber'] ?? '').toString(),
+            'phone': (d['phone'] ?? '').toString(),
+            'flockSize': (d['flockSize'] ?? '').toString(),
+            'location': (d['location'] ?? '').toString(),
+            'farmNo': (d['farmNo'] ?? '').toString(),
+            'gender': (d['gender'] ?? '').toString(),
+            'rank': (d['position'] ?? 'Member').toString(),
+            'isGranted': granted,
+            'hasPendingRequest': !granted,
+          });
+        }
+        list.sort((a, b) => (a['name'] as String)
+            .toLowerCase()
+            .compareTo((b['name'] as String).toLowerCase()));
+        for (int i = 0; i < list.length; i++) {
+          list[i]['memberNo'] = (i + 1).toString().padLeft(2, '0');
+        }
+        final pendingNow = list
+            .where((m) => m['hasPendingRequest'] == true)
+            .map((m) => m['uid'] as String)
+            .toSet();
+
+        // Toast for members who signed up while this screen is open
+        if (_usersInitialized && _canSeeNotifications) {
+          for (final m in list) {
+            final uid = m['uid'] as String;
+            if (pendingNow.contains(uid) && !_knownPendingUids.contains(uid)) {
+              _showNewMemberToast(m['name'].toString());
+            }
+          }
+        }
+        _knownPendingUids
+          ..clear()
+          ..addAll(pendingNow);
+        _usersInitialized = true;
+
+        if (mounted) setState(() => _members = list);
+      },
+      onError: (_) {},
+    );
+
+    // 3. Which dashboard tiles each role can see
+    _accessSub = db.collection('config').doc('roleAccess').snapshots().listen(
+      (snap) {
+        final d = snap.data();
+        if (d == null || !mounted) return;
+        setState(() {
+          d.forEach((role, value) {
+            if (value is List) {
+              _roleModuleAccess[role] =
+                  value.map<int>((e) => (e as num).toInt()).toList();
+            }
+          });
+        });
+      },
+      onError: (_) {},
+    );
+  }
+
+  // ---- Saving admin changes ----
+
+  Future<void> _saveMember(String? uid, Map<String, dynamic> updated) async {
+    if (uid == null || uid.isEmpty) return;
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(uid).update({
+        'position': updated['rank'] ?? 'Member',
+        'isGranted': updated['isGranted'] ?? false,
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not save changes: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _saveRoleAccess(String role, List<int> modules) async {
+    try {
+      await FirebaseFirestore.instance
+          .collection('config')
+          .doc('roleAccess')
+          .set({role: modules}, SetOptions(merge: true));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not save tile access: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
 
   final List<Map<String, dynamic>> _transactions = [
     {'title': 'bought a goat', 'date': '2026-09-21', 'amount': 54000.0, 'isCredit': true},
@@ -216,52 +303,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       );
     }
 
-    final routeArgs = ModalRoute.of(context)?.settings.arguments;
-    String userQuery = '';
-
-    if (routeArgs is Map<String, dynamic>) {
-      userQuery = (routeArgs['email'] ?? '').toString().toLowerCase().trim();
-    }
-
-    // After a page refresh there are no route arguments, so use the
-    // signed-in Firebase account instead.
-    if (userQuery.isEmpty) {
-      userQuery =
-          (FirebaseAuth.instance.currentUser?.email ?? '').toLowerCase().trim();
-    }
-
-    String activeRole = 'Member';
-    bool isGranted = true;
-
-    if (_storedRole == 'Admin') {
-      activeRole = 'Admin';
-      isGranted = true;
-    } else if (userQuery.isNotEmpty) {
-      final Map<String, dynamic> matchedUser = _members.firstWhere(
-        (m) {
-          final name = (m['name'] ?? '').toString().toLowerCase();
-          final email = (m['email'] ?? '').toString().toLowerCase();
-          final rank = (m['rank'] ?? '').toString().toLowerCase();
-          return name.contains(userQuery) ||
-              email.contains(userQuery) ||
-              rank.contains(userQuery);
-        },
-        orElse: () => _members.firstWhere(
-          (m) => m['rank'] == 'Member',
-          orElse: () => _members.last,
-        ),
-      );
-
-      activeRole = matchedUser['rank'] as String? ?? 'Member';
-      isGranted = matchedUser['isGranted'] as bool? ?? true;
-    } else {
-      final Map<String, dynamic> defaultUser = _members.firstWhere(
-        (m) => m['rank'] == 'Member',
-        orElse: () => _members.last,
-      );
-      activeRole = defaultUser['rank'] as String? ?? 'Member';
-      isGranted = defaultUser['isGranted'] as bool? ?? true;
-    }
+    final bool isAdmin = _storedRole == 'Admin';
+    final String activeRole = isAdmin ? 'Admin' : _position;
+    final bool isGranted = isAdmin ? true : _isGranted;
+    final List<Map<String, dynamic>> pendingMembers =
+        _members.where((m) => m['hasPendingRequest'] == true).toList();
 
     final List<int> currentActiveIndexes =
         _roleModuleAccess[activeRole] ?? <int>[];
@@ -281,17 +327,21 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         memberRoles: _members,
         roleModuleAccess: _roleModuleAccess,
         onUpdateMemberRole: (index, updated) {
-          setState(() => _members[index] = updated);
+          final String? uid =
+              (updated['uid'] ?? _members[index]['uid'])?.toString();
+          setState(() => _members[index] = {..._members[index], ...updated});
+          _saveMember(uid, updated);
         },
         onUpdateRoleModules: (role, updatedModules) {
-          setState(() {
-            _roleModuleAccess[role] = List<int>.from(updatedModules);
-          });
+          final modules = List<int>.from(updatedModules);
+          setState(() => _roleModuleAccess[role] = modules);
+          _saveRoleAccess(role, modules);
         },
         onAddRole: (newRole) {
           setState(() {
             _roleModuleAccess.putIfAbsent(newRole, () => <int>[]);
           });
+          _saveRoleAccess(newRole, _roleModuleAccess[newRole] ?? <int>[]);
         },
       ),
       SecretaryPage(
@@ -368,6 +418,19 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
                       ),
                       Row(
                         children: [
+                          if (_canSeeNotifications) ...[
+                            Badge(
+                              isLabelVisible: pendingMembers.isNotEmpty,
+                              label: Text('${pendingMembers.length}'),
+                              child: IconButton(
+                                icon: const Icon(Icons.notifications_outlined,
+                                    color: Color(0xFF1B5E20)),
+                                tooltip: 'New members',
+                                onPressed: () => _showPendingDialog(pendingMembers),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                          ],
                           Chip(
                             label: Text(
                               activeRole,
@@ -394,6 +457,65 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  void _showNewMemberToast(String name) {
+    if (!mounted) return;
+    final bool isAdmin = _storedRole == 'Admin';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('New member signed up: $name'),
+        backgroundColor: const Color(0xFF2E7D32),
+        duration: const Duration(seconds: 8),
+        action: SnackBarAction(
+          label: 'VIEW',
+          textColor: Colors.white,
+          onPressed: () => setState(() => _currentIndex = isAdmin ? 1 : 2),
+        ),
+      ),
+    );
+  }
+
+  void _showPendingDialog(List<Map<String, dynamic>> pending) {
+    final bool isAdmin = _storedRole == 'Admin';
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New members awaiting access'),
+        content: SizedBox(
+          width: 360,
+          child: pending.isEmpty
+              ? const Text('No new members right now.')
+              : ListView(
+                  shrinkWrap: true,
+                  children: pending
+                      .map(
+                        (m) => ListTile(
+                          leading: const Icon(Icons.person_add_alt_1,
+                              color: Color(0xFF1B5E20)),
+                          title: Text(m['name'].toString()),
+                          subtitle: Text(m['email'].toString()),
+                        ),
+                      )
+                      .toList(),
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+          if (pending.isNotEmpty)
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                setState(() => _currentIndex = isAdmin ? 1 : 2);
+              },
+              child: Text(isAdmin ? 'Open Admin Panel' : 'Open Secretary Desk'),
+            ),
         ],
       ),
     );
