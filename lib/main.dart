@@ -195,7 +195,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
         if (mounted) setState(() => _members = list);
       },
-      onError: (_) {},
+      onError: (e) => _showLoadError('members', e),
     );
 
     // 3. Which dashboard tiles each role can see
@@ -213,6 +213,18 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         });
       },
       onError: (_) {},
+    );
+  }
+
+  void _showLoadError(String what, Object e) {
+    debugPrint('Firestore error loading $what: $e');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Could not load $what: $e'),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 15),
+      ),
     );
   }
 
