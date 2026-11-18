@@ -72,6 +72,32 @@ class MainNavigationScreen extends StatefulWidget {
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
 
+  String _storedRole = 'Member';
+  bool _roleLoaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStoredRole();
+  }
+
+  /// Reads this account's role from Firestore (users/{uid}).
+  Future<void> _loadStoredRole() async {
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null) {
+        final snap = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .get();
+        _storedRole = (snap.data()?['role'] as String?) ?? 'Member';
+      }
+    } catch (_) {
+      // Firestore unreachable: stay on Member
+    }
+    if (mounted) setState(() => _roleLoaded = true);
+  }
+
   final List<Map<String, dynamic>> _members = [
     {
       'memberNo': '01',
@@ -184,15 +210,17 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_roleLoaded) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
     final routeArgs = ModalRoute.of(context)?.settings.arguments;
-    String loginType = 'Member';
     String userQuery = '';
 
     if (routeArgs is Map<String, dynamic>) {
-      loginType = routeArgs['loginType'] ?? 'Member';
       userQuery = (routeArgs['email'] ?? '').toString().toLowerCase().trim();
-    } else if (routeArgs is String) {
-      loginType = routeArgs;
     }
 
     // After a page refresh there are no route arguments, so use the
@@ -205,7 +233,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     String activeRole = 'Member';
     bool isGranted = true;
 
-    if (loginType == 'Admin') {
+    if (_storedRole == 'Admin') {
       activeRole = 'Admin';
       isGranted = true;
     } else if (userQuery.isNotEmpty) {
