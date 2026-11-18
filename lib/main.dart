@@ -82,6 +82,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   // ---- New member notifications ----
   final Set<String> _knownPendingUids = {};
   bool _usersInitialized = false;
+  bool _autoPopupShown = false;
 
   bool get _canSeeNotifications =>
       _storedRole == 'Admin' || _position == 'Secretary';
@@ -309,6 +310,14 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     final List<Map<String, dynamic>> pendingMembers =
         _members.where((m) => m['hasPendingRequest'] == true).toList();
 
+    // Admin: open the approval pop-up once per session when members are waiting
+    if (isAdmin && !_autoPopupShown && pendingMembers.isNotEmpty) {
+      _autoPopupShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showPendingDialog(pendingMembers);
+      });
+    }
+
     final List<int> currentActiveIndexes =
         _roleModuleAccess[activeRole] ?? <int>[];
 
@@ -473,7 +482,15 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         action: SnackBarAction(
           label: 'VIEW',
           textColor: Colors.white,
-          onPressed: () => setState(() => _currentIndex = isAdmin ? 1 : 2),
+          onPressed: () {
+            if (isAdmin) {
+              _showPendingDialog(_members
+                  .where((m) => m['hasPendingRequest'] == true)
+                  .toList());
+            } else {
+              setState(() => _currentIndex = 2);
+            }
+          },
         ),
       ),
     );
@@ -481,42 +498,121 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
   void _showPendingDialog(List<Map<String, dynamic>> pending) {
     final bool isAdmin = _storedRole == 'Admin';
+    final List<Map<String, dynamic>> items = List.of(pending);
+
+    // Positions the admin can choose from (includes any roles added later)
+    final List<String> positions = [
+      'Member',
+      ..._roleModuleAccess.keys.where((r) => r != 'Member'),
+    ];
+    // Position picked for each waiting member (defaults to Member)
+    final Map<String, String> chosen = {
+      for (final m in items)
+        m['uid'].toString(): positions.contains(m['rank'])
+            ? m['rank'].toString()
+            : 'Member',
+    };
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('New members awaiting access'),
-        content: SizedBox(
-          width: 360,
-          child: pending.isEmpty
-              ? const Text('No new members right now.')
-              : ListView(
-                  shrinkWrap: true,
-                  children: pending
-                      .map(
-                        (m) => ListTile(
-                          leading: const Icon(Icons.person_add_alt_1,
-                              color: Color(0xFF1B5E20)),
-                          title: Text(m['name'].toString()),
-                          subtitle: Text(m['email'].toString()),
-                        ),
-                      )
-                      .toList(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          Future<void> grant(Map<String, dynamic> m) async {
+            final String uid = m['uid'].toString();
+            final String position = chosen[uid] ?? 'Member';
+            await _saveMember(uid, {'rank': position, 'isGranted': true});
+            setDialogState(() => items.removeWhere((x) => x['uid'] == m['uid']));
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('${m['name']} now has access as $position'),
+                  backgroundColor: const Color(0xFF2E7D32),
                 ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Close'),
-          ),
-          if (pending.isNotEmpty)
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                setState(() => _currentIndex = isAdmin ? 1 : 2);
-              },
-              child: Text(isAdmin ? 'Open Admin Panel' : 'Open Secretary Desk'),
+              );
+            }
+          }
+
+          return AlertDialog(
+            title: const Text('New members awaiting access'),
+            content: SizedBox(
+              width: 460,
+              child: items.isEmpty
+                  ? const Text('No new members waiting right now.')
+                  : ListView(
+                      shrinkWrap: true,
+                      children: items.map((m) {
+                        final String uid = m['uid'].toString();
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: const Icon(Icons.person_add_alt_1,
+                                    color: Color(0xFF1B5E20)),
+                                title: Text(m['name'].toString()),
+                                subtitle: Text(m['email'].toString()),
+                              ),
+                              if (isAdmin)
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: DropdownButtonFormField<String>(
+                                        key: ValueKey('pos_$uid'),
+                                        initialValue: chosen[uid],
+                                        decoration: const InputDecoration(
+                                          labelText: 'Assign position',
+                                          isDense: true,
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        items: positions
+                                            .map((r) => DropdownMenuItem(
+                                                value: r, child: Text(r)))
+                                            .toList(),
+                                        onChanged: (val) => setDialogState(
+                                            () => chosen[uid] = val ?? 'Member'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    ElevatedButton(
+                                      onPressed: () => grant(m),
+                                      child: const Text('Grant access'),
+                                    ),
+                                  ],
+                                ),
+                              const Divider(),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    ),
             ),
-        ],
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Close'),
+              ),
+              if (isAdmin && items.length > 1)
+                TextButton(
+                  onPressed: () async {
+                    for (final m in List.of(items)) {
+                      await grant(m);
+                    }
+                  },
+                  child: const Text('Grant all'),
+                ),
+              if (items.isNotEmpty && !isAdmin)
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    setState(() => _currentIndex = 2);
+                  },
+                  child: const Text('Open Secretary Desk'),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
