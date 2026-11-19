@@ -102,6 +102,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _ownSub;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _usersSub;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _accessSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _announcementsSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _appointmentsSub;
+
+  String _myName = '';
+  List<Map<String, dynamic>> _appointments = [];
+  final Set<String> _knownPendingAppointments = {};
+  bool _appointmentsInitialized = false;
 
   @override
   void initState() {
@@ -114,6 +121,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     _ownSub?.cancel();
     _usersSub?.cancel();
     _accessSub?.cancel();
+    _announcementsSub?.cancel();
+    _appointmentsSub?.cancel();
     super.dispose();
   }
 
@@ -129,13 +138,18 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     _ownSub = db.collection('users').doc(user.uid).snapshots().listen(
       (snap) {
         final d = snap.data();
+        // Signed in but no record yet (e.g. account made before the
+        // approval system): create it so the admin can see this member.
+        if (!snap.exists) _createOwnRecord(user);
         if (!mounted) return;
         setState(() {
           _storedRole = (d?['role'] as String?) ?? 'Member';
           _position = (d?['position'] as String?) ?? 'Member';
           _isGranted = (d?['isGranted'] as bool?) ?? false;
+          _myName = (d?['name'] as String?) ?? '';
           _roleLoaded = true;
         });
+        _syncAppointmentsListener();
       },
       onError: (_) {
         if (mounted) setState(() => _roleLoaded = true);
@@ -151,7 +165,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           if ((d['role'] ?? 'Member') == 'Admin') continue;
           final email = (d['email'] ?? '').toString();
           final granted = (d['isGranted'] as bool?) ?? false;
-          final rejected = (d['requestRejected'] as bool?) ?? false;
           list.add({
             'uid': doc.id,
             'name': (d['name'] ??
@@ -166,8 +179,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
             'gender': (d['gender'] ?? '').toString(),
             'rank': (d['position'] ?? 'Member').toString(),
             'isGranted': granted,
-            'requestRejected': rejected,
-            'hasPendingRequest': !granted && !rejected,
+            'hasPendingRequest': !granted,
           });
         }
         list.sort((a, b) => (a['name'] as String)
@@ -200,6 +212,28 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       onError: (e) => _showLoadError('members', e),
     );
 
+    // 4. Announcements posted by the Secretary, Vet, Chairperson or Admin
+    _announcementsSub = db
+        .collection('announcements')
+        .orderBy('createdAt', descending: true)
+        .limit(50)
+        .snapshots()
+        .listen(
+      (snap) {
+        final list = snap.docs.map<Map<String, String>>((doc) {
+          final d = doc.data();
+          return {
+            'title': (d['title'] ?? '').toString(),
+            'date': (d['date'] ?? '').toString(),
+            'content': (d['content'] ?? '').toString(),
+            'by': (d['by'] ?? '').toString(),
+          };
+        }).toList();
+        if (mounted) setState(() => _announcements = list);
+      },
+      onError: (e) => _showLoadError('announcements', e),
+    );
+
     // 3. Which dashboard tiles each role can see
     _accessSub = db.collection('config').doc('roleAccess').snapshots().listen(
       (snap) {
@@ -230,7 +264,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     );
   }
 
-  // ---- Saving admin / secretary changes ----
+  // ---- Saving admin changes ----
 
   Future<void> _saveMember(String? uid, Map<String, dynamic> updated) async {
     if (uid == null || uid.isEmpty) return;
@@ -238,8 +272,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'position': updated['rank'] ?? 'Member',
         'isGranted': updated['isGranted'] ?? false,
-        if (updated.containsKey('requestRejected'))
-          'requestRejected': updated['requestRejected'],
       });
     } catch (e) {
       if (!mounted) return;
@@ -250,14 +282,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         ),
       );
     }
-  }
-
-  /// Shared by AdminPage and SecretaryPage (approve / reject / change role).
-  void _updateMemberRole(int index, Map<String, dynamic> updated) {
-    final String? uid =
-        (updated['uid'] ?? _members[index]['uid'])?.toString();
-    setState(() => _members[index] = {..._members[index], ...updated});
-    _saveMember(uid, updated);
   }
 
   Future<void> _saveRoleAccess(String role, List<int> modules) async {
@@ -283,13 +307,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     {'title': 'Veterinary Supplies Purchase', 'date': '2026-09-15', 'amount': 5000.0, 'isCredit': false},
   ];
 
-  final List<Map<String, String>> _announcements = [
-    {
-      'title': 'Monthly Group Meeting',
-      'date': '2026-09-20',
-      'content': 'Please remember our monthly meeting is scheduled for this Saturday at 10 AM.',
-    },
-  ];
+  List<Map<String, String>> _announcements = [];
 
   double get _totalFunds {
     double total = 0;
@@ -333,6 +351,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     final bool isGranted = isAdmin ? true : _isGranted;
     final List<Map<String, dynamic>> pendingMembers =
         _members.where((m) => m['hasPendingRequest'] == true).toList();
+    final int pendingAppointmentCount =
+        _appointments.where((a) => a['status'] == 'Pending').length;
 
     // Admin: open the approval pop-up once per session when members are waiting
     if (isAdmin && !_autoPopupShown && pendingMembers.isNotEmpty) {
@@ -359,7 +379,12 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       AdminPage(
         memberRoles: _members,
         roleModuleAccess: _roleModuleAccess,
-        onUpdateMemberRole: _updateMemberRole,
+        onUpdateMemberRole: (index, updated) {
+          final String? uid =
+              (updated['uid'] ?? _members[index]['uid'])?.toString();
+          setState(() => _members[index] = {..._members[index], ...updated});
+          _saveMember(uid, updated);
+        },
         onUpdateRoleModules: (role, updatedModules) {
           final modules = List<int>.from(updatedModules);
           setState(() => _roleModuleAccess[role] = modules);
@@ -375,14 +400,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       SecretaryPage(
         members: _formattedMembersList,
         announcements: _announcements,
-        memberRoles: _members,
-        onUpdateMemberRole: _updateMemberRole,
         onAddMember: (member) => setState(() => _members.add(member)),
         onUpdateMember: (index, updatedMember) =>
             setState(() => _members[index] = updatedMember),
         onDeleteMember: (index) => setState(() => _members.removeAt(index)),
-        onPostAnnouncement: (announcement) =>
-            setState(() => _announcements.insert(0, announcement)),
+        onPostAnnouncement: (announcement) => _postAnnouncement(announcement),
       ),
       TreasurerPage(
         transactions: _transactions,
@@ -392,8 +414,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       const MembersViewPage(),
       SheepPage(),
       VetPage(
-        onPostAnnouncement: (announcement) =>
-            setState(() => _announcements.insert(0, announcement)),
+        onPostAnnouncement: (announcement) => _postAnnouncement(announcement),
       ),
       const healthRecordsPage(),
       const BreedingPage(),
@@ -461,6 +482,19 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
                             ),
                             const SizedBox(width: 8),
                           ],
+                          if (_position == 'Vet' && !isAdmin) ...[
+                            Badge(
+                              isLabelVisible: pendingAppointmentCount > 0,
+                              label: Text('$pendingAppointmentCount'),
+                              child: IconButton(
+                                icon: const Icon(Icons.event_available_outlined,
+                                    color: Color(0xFF1B5E20)),
+                                tooltip: 'Vet appointments',
+                                onPressed: _showAppointmentsDialog,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                          ],
                           Chip(
                             label: Text(
                               activeRole,
@@ -486,6 +520,226 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
                 Expanded(child: pages[_currentIndex]),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  bool _creatingOwnRecord = false;
+
+  Future<void> _createOwnRecord(User user) async {
+    if (_creatingOwnRecord) return;
+    _creatingOwnRecord = true;
+    try {
+      final String email = (user.email ?? '').toLowerCase();
+      final String name =
+          (user.displayName != null && user.displayName!.trim().isNotEmpty)
+              ? user.displayName!.trim()
+              : (email.contains('@') ? email.split('@').first : 'Member');
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        'email': email,
+        'name': name,
+        'role': 'Member',
+        'position': 'Member',
+        'isGranted': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      _creatingOwnRecord = false;
+      _showLoadError('your profile', e);
+    }
+  }
+
+  // ---- Announcements ----
+
+  Future<void> _postAnnouncement(Map<String, String> a) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final String who = _storedRole == 'Admin' ? 'Admin' : _position;
+    final String today = DateTime.now().toIso8601String().substring(0, 10);
+    try {
+      await FirebaseFirestore.instance.collection('announcements').add({
+        'title': a['title'] ?? '',
+        'date': (a['date'] ?? '').isEmpty ? today : a['date'],
+        'content': a['content'] ?? '',
+        'by': _myName.isNotEmpty ? '$_myName ($who)' : who,
+        'authorUid': user?.uid,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not post announcement: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  // ---- Vet appointments (vet only) ----
+
+  void _syncAppointmentsListener() {
+    final bool isVet = _position == 'Vet';
+    if (isVet && _appointmentsSub == null) {
+      _appointmentsSub = FirebaseFirestore.instance
+          .collection('appointments')
+          .snapshots()
+          .listen(
+        (snap) {
+          final list = snap.docs
+              .map<Map<String, dynamic>>((doc) => {...doc.data(), 'id': doc.id})
+              .toList();
+          int stamp(Map<String, dynamic> m) =>
+              (m['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ??
+              DateTime.now().millisecondsSinceEpoch;
+          list.sort((a, b) => stamp(b).compareTo(stamp(a)));
+
+          final pendingNow = list
+              .where((a) => a['status'] == 'Pending')
+              .map((a) => a['id'] as String)
+              .toSet();
+
+          if (_appointmentsInitialized) {
+            for (final a in list) {
+              final id = a['id'] as String;
+              if (pendingNow.contains(id) &&
+                  !_knownPendingAppointments.contains(id)) {
+                _showNewAppointmentToast(
+                    (a['memberName'] ?? 'A member').toString(),
+                    (a['date'] ?? '').toString());
+              }
+            }
+          }
+          _knownPendingAppointments
+            ..clear()
+            ..addAll(pendingNow);
+          _appointmentsInitialized = true;
+
+          if (mounted) setState(() => _appointments = list);
+        },
+        onError: (e) => _showLoadError('appointments', e),
+      );
+    } else if (!isVet && _appointmentsSub != null) {
+      _appointmentsSub?.cancel();
+      _appointmentsSub = null;
+      _knownPendingAppointments.clear();
+      _appointmentsInitialized = false;
+      if (mounted) setState(() => _appointments = []);
+    }
+  }
+
+  void _showNewAppointmentToast(String memberName, String date) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('New vet appointment request from $memberName for $date'),
+        backgroundColor: const Color(0xFF2E7D32),
+        duration: const Duration(seconds: 8),
+        action: SnackBarAction(
+          label: 'VIEW',
+          textColor: Colors.white,
+          onPressed: _showAppointmentsDialog,
+        ),
+      ),
+    );
+  }
+
+  void _showAppointmentsDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Vet appointments'),
+        content: SizedBox(
+          width: 480,
+          child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: FirebaseFirestore.instance.collection('appointments').snapshots(),
+            builder: (context, snap) {
+              if (snap.hasError) {
+                return Text('Could not load appointments: ${snap.error}');
+              }
+              if (!snap.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              final docs = snap.data!.docs.where((d) {
+                final st = d.data()['status'];
+                return st == 'Pending' || st == 'Confirmed';
+              }).toList();
+              docs.sort((a, b) => (a.data()['date'] ?? '')
+                  .toString()
+                  .compareTo((b.data()['date'] ?? '').toString()));
+
+              if (docs.isEmpty) {
+                return const Text('No open appointments right now.');
+              }
+              return ListView(
+                shrinkWrap: true,
+                children: docs.map((doc) {
+                  final d = doc.data();
+                  final bool isPending = d['status'] == 'Pending';
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  (d['farmerName'] ?? '').toString(),
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold, fontSize: 15),
+                                ),
+                              ),
+                              Chip(
+                                label: Text(d['status'].toString(),
+                                    style: const TextStyle(fontSize: 11)),
+                                visualDensity: VisualDensity.compact,
+                              ),
+                            ],
+                          ),
+                          Text('Booked by: ${d['memberName'] ?? ''} (${d['memberEmail'] ?? ''})'),
+                          Text('Date: ${d['date'] ?? ''}   Fee: KES ${d['fee'] ?? ''}'),
+                          Text('Reason: ${d['reason'] ?? ''}'),
+                          const SizedBox(height: 8),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              if (isPending) ...[
+                                TextButton(
+                                  onPressed: () =>
+                                      doc.reference.update({'status': 'Declined'}),
+                                  child: const Text('Decline'),
+                                ),
+                                const SizedBox(width: 8),
+                                ElevatedButton(
+                                  onPressed: () =>
+                                      doc.reference.update({'status': 'Confirmed'}),
+                                  child: const Text('Confirm'),
+                                ),
+                              ] else
+                                ElevatedButton(
+                                  onPressed: () =>
+                                      doc.reference.update({'status': 'Completed'}),
+                                  child: const Text('Mark done'),
+                                ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }).toList(),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
           ),
         ],
       ),
@@ -541,11 +795,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           Future<void> grant(Map<String, dynamic> m) async {
             final String uid = m['uid'].toString();
             final String position = chosen[uid] ?? 'Member';
-            await _saveMember(uid, {
-              'rank': position,
-              'isGranted': true,
-              'requestRejected': false,
-            });
+            await _saveMember(uid, {'rank': position, 'isGranted': true});
             setDialogState(() => items.removeWhere((x) => x['uid'] == m['uid']));
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(

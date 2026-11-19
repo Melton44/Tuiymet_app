@@ -1,26 +1,34 @@
 import 'package:flutter/material.dart';
-import 'pending_requests.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
+const Color _green = Color(0xFF1B5E20);
+
+BoxDecoration _cardDecoration() => BoxDecoration(
+      color: Colors.white.withValues(alpha: 0.92),
+      borderRadius: BorderRadius.circular(20),
+    );
+
+/// Secretary workspace.
+///
+/// Members sign up themselves. The Secretary completes their official records
+/// (membership no, farm no and details) and posts announcements. The extra
+/// constructor callbacks are kept so main.dart does not need to change.
 class SecretaryPage extends StatefulWidget {
   final List<Map<String, String>> members;
   final List<Map<String, String>> announcements;
-  final List<Map<String, dynamic>> memberRoles;
-  final Function(Map<String, String>) onAddMember;
-  final Function(int, Map<String, String>) onUpdateMember;
-  final Function(int) onDeleteMember;
-  final Function(Map<String, String>) onPostAnnouncement;
-  final Function(int, Map<String, dynamic>) onUpdateMemberRole;
+  final ValueChanged<Map<String, dynamic>> onAddMember;
+  final void Function(int index, Map<String, dynamic> updated) onUpdateMember;
+  final ValueChanged<int> onDeleteMember;
+  final ValueChanged<Map<String, String>> onPostAnnouncement;
 
   const SecretaryPage({
     super.key,
     required this.members,
     required this.announcements,
-    required this.memberRoles,
     required this.onAddMember,
     required this.onUpdateMember,
     required this.onDeleteMember,
     required this.onPostAnnouncement,
-    required this.onUpdateMemberRole,
   });
 
   @override
@@ -28,533 +36,518 @@ class SecretaryPage extends StatefulWidget {
 }
 
 class _SecretaryPageState extends State<SecretaryPage> {
-  final _memberNoController = TextEditingController();
-  final _nameController = TextEditingController();
-  final _idController = TextEditingController();
-  final _phoneController = TextEditingController();
-  final _flockSizeController = TextEditingController();
-  final _locationController = TextEditingController();
-  final _farmNoController = TextEditingController();
-  final _announcementController = TextEditingController();
+  final _memberNo = TextEditingController();
+  final _farmNo = TextEditingController();
+  final _name = TextEditingController();
+  final _idNumber = TextEditingController();
+  final _phone = TextEditingController();
+  final _location = TextEditingController();
+  final _flockSize = TextEditingController();
+  String _gender = '';
+  String? _selectedUid;
+  bool _saving = false;
 
-  String _gender = 'Female';
-  String _rank = 'Chairperson';
-  int? _editingIndex; // Null when registering, holds index when editing
+  final _noticeTitle = TextEditingController();
+  final _noticeBody = TextEditingController();
 
-  void _submitMember() {
-    if (_memberNoController.text.isEmpty ||
-        _nameController.text.isEmpty ||
-        _idController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill in Member No, Name, and National ID')),
-      );
-      return;
-    }
+  final _search = TextEditingController();
+  String _query = '';
 
-    String formattedMemberNo = _memberNoController.text.trim();
-    if (formattedMemberNo.length == 1) {
-      formattedMemberNo = '0$formattedMemberNo';
-    }
-
-    String formattedFarmNo = _farmNoController.text.trim();
-    if (formattedFarmNo.length == 1) {
-      formattedFarmNo = '0$formattedFarmNo';
-    }
-
-    final memberData = {
-      'memberNo': formattedMemberNo,
-      'name': _nameController.text.trim(),
-      'id': _idController.text.trim(),
-      'phone': _phoneController.text.trim(),
-      'flockSize': _flockSizeController.text.trim().isEmpty ? '0' : _flockSizeController.text.trim(),
-      'location': _locationController.text.trim(),
-      'farmNo': formattedFarmNo,
-      'gender': _gender,
-      'rank': _rank,
-    };
-
-    if (_editingIndex != null) {
-      widget.onUpdateMember(_editingIndex!, memberData);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Member profile updated successfully!')),
-      );
-    } else {
-      widget.onAddMember(memberData);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Member registered successfully!')),
-      );
-    }
-
-    _clearForm();
+  @override
+  void dispose() {
+    _memberNo.dispose();
+    _farmNo.dispose();
+    _name.dispose();
+    _idNumber.dispose();
+    _phone.dispose();
+    _location.dispose();
+    _flockSize.dispose();
+    _noticeTitle.dispose();
+    _noticeBody.dispose();
+    _search.dispose();
+    super.dispose();
   }
 
-  void _startEditing(int index) {
-    final m = widget.members[index];
-    setState(() {
-      _editingIndex = index;
-      _memberNoController.text = m['memberNo'] ?? '';
-      _nameController.text = m['name'] ?? '';
-      _idController.text = m['id'] ?? '';
-      _phoneController.text = m['phone'] ?? '';
-      _flockSizeController.text = m['flockSize'] ?? '';
-      _locationController.text = m['location'] ?? '';
-      _farmNoController.text = m['farmNo'] ?? '';
-      _gender = (m['gender'] == 'Male' || m['gender'] == 'Female') ? m['gender']! : 'Female';
-      _rank = ['Chairperson', 'Treasurer', 'Secretary', 'Member'].contains(m['rank'])
-          ? m['rank']!
-          : 'Member';
-    });
-  }
-
-  void _confirmDelete(int index) {
-    final memberName = widget.members[index]['name'] ?? 'Member';
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete Member'),
-        content: Text('Are you sure you want to remove $memberName from the registry?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-            onPressed: () {
-              widget.onDeleteMember(index);
-              Navigator.pop(ctx);
-              if (_editingIndex == index) {
-                _clearForm();
-              }
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('$memberName removed')),
-              );
-            },
-            child: const Text('Delete', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
+  void _toast(String msg, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: error ? Colors.red : _green),
     );
+  }
+
+  void _select(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+    final d = doc.data();
+    setState(() {
+      _selectedUid = doc.id;
+      _memberNo.text = (d['memberNo'] ?? '').toString();
+      _farmNo.text = (d['farmNo'] ?? '').toString();
+      _name.text = (d['name'] ?? '').toString();
+      _idNumber.text = (d['idNumber'] ?? '').toString();
+      _phone.text = (d['phone'] ?? '').toString();
+      _location.text = (d['location'] ?? '').toString();
+      _flockSize.text = (d['flockSize'] ?? '').toString();
+      _gender = (d['gender'] ?? '').toString();
+    });
   }
 
   void _clearForm() {
     setState(() {
-      _editingIndex = null;
-      _memberNoController.clear();
-      _nameController.clear();
-      _idController.clear();
-      _phoneController.clear();
-      _flockSizeController.clear();
-      _locationController.clear();
-      _farmNoController.clear();
-      _gender = 'Female';
-      _rank = 'Chairperson';
+      _selectedUid = null;
+      _memberNo.clear();
+      _farmNo.clear();
+      _name.clear();
+      _idNumber.clear();
+      _phone.clear();
+      _location.clear();
+      _flockSize.clear();
+      _gender = '';
     });
   }
 
-  void _submitAnnouncement() {
-    if (_announcementController.text.isEmpty) return;
-    widget.onPostAnnouncement({
-      'title': 'General Announcement',
-      'date': DateTime.now().toString().split(' ')[0],
-      'content': _announcementController.text.trim(),
-    });
-    _announcementController.clear();
+  /// Returns a two-digit "01"-"99" string, '' for empty, or null if invalid.
+  String? _twoDigits(String raw) {
+    final t = raw.trim();
+    if (t.isEmpty) return '';
+    final n = int.tryParse(t);
+    if (n == null || n < 1 || n > 99) return null;
+    return n.toString().padLeft(2, '0');
   }
 
-  @override
-  void dispose() {
-    _memberNoController.dispose();
-    _nameController.dispose();
-    _idController.dispose();
-    _phoneController.dispose();
-    _flockSizeController.dispose();
-    _locationController.dispose();
-    _farmNoController.dispose();
-    _announcementController.dispose();
-    super.dispose();
+  Future<void> _save(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) async {
+    if (_selectedUid == null) {
+      _toast('Select a member first.', error: true);
+      return;
+    }
+    if (_name.text.trim().isEmpty) {
+      _toast('Full name is required.', error: true);
+      return;
+    }
+    final memberNo = _twoDigits(_memberNo.text);
+    final farmNo = _twoDigits(_farmNo.text);
+    if (memberNo == null || farmNo == null) {
+      _toast('Member No and Farm No must be a number from 01 to 99.', error: true);
+      return;
+    }
+    if (memberNo.isNotEmpty) {
+      final taken = docs.any((d) =>
+          d.id != _selectedUid && (d.data()['memberNo'] ?? '').toString() == memberNo);
+      if (taken) {
+        _toast('Member No $memberNo is already used by another member.', error: true);
+        return;
+      }
+    }
+
+    setState(() => _saving = true);
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(_selectedUid).update({
+        'memberNo': memberNo,
+        'farmNo': farmNo,
+        'name': _name.text.trim(),
+        'idNumber': _idNumber.text.trim(),
+        'phone': _phone.text.trim(),
+        'location': _location.text.trim(),
+        'flockSize': _flockSize.text.trim(),
+        'gender': _gender,
+      });
+      _toast('Member record saved.');
+    } catch (e) {
+      _toast('Could not save: $e', error: true);
+    }
+    if (mounted) setState(() => _saving = false);
   }
+
+  void _postNotice() {
+    final title = _noticeTitle.text.trim();
+    final body = _noticeBody.text.trim();
+    if (title.isEmpty || body.isEmpty) {
+      _toast('Please add a title and a message.', error: true);
+      return;
+    }
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    widget.onPostAnnouncement({'title': title, 'date': today, 'content': body});
+    _noticeTitle.clear();
+    _noticeBody.clear();
+    _toast('Announcement posted.');
+  }
+
+  InputDecoration _decoration(String label, IconData icon) => InputDecoration(
+        labelText: label,
+        prefixIcon: Icon(icon, color: _green),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        filled: true,
+        fillColor: Colors.white,
+      );
 
   @override
   Widget build(BuildContext context) {
-    const Color primaryGreen = Color(0xFF1B5E20);
-    const Color accentGreen = Color(0xFF2E7D32);
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance.collection('users').snapshots(),
+      builder: (context, snap) {
+        if (snap.hasError) {
+          return Center(
+            child: Container(
+              margin: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(20),
+              decoration: _cardDecoration(),
+              child: Text('Could not load members: ${snap.error}'),
+            ),
+          );
+        }
+        if (!snap.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          // 0. Pending Access Requests (hidden when there are none)
-          PendingRequestsCard(
-            memberRoles: widget.memberRoles,
-            onUpdateMemberRole: widget.onUpdateMemberRole,
-          ),
+        final docs = snap.data!.docs
+            .where((d) => (d.data()['role'] ?? 'Member') != 'Admin')
+            .toList()
+          ..sort((a, b) => (a.data()['name'] ?? '')
+              .toString()
+              .toLowerCase()
+              .compareTo((b.data()['name'] ?? '').toString().toLowerCase()));
 
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // 1. Member Profile Form Panel
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(22),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.92),
-                    borderRadius: BorderRadius.circular(24),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.06),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: Column(
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final bool wide = constraints.maxWidth >= 900;
+            final form = _buildForm(docs);
+            final log = _buildLog(docs);
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+              children: [
+                if (wide)
+                  Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Row(
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: accentGreen.withValues(alpha: 0.12),
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: Icon(
-                                  _editingIndex != null ? Icons.edit_note : Icons.person_add_alt_1,
-                                  color: primaryGreen,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    _editingIndex != null ? 'Edit Member Profile' : 'Tuiymet Member Profile',
-                                    style: const TextStyle(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold,
-                                      color: primaryGreen,
-                                    ),
-                                  ),
-                                  Text(
-                                    _editingIndex != null ? 'Updating registered record' : 'Register credentials below',
-                                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                          if (_editingIndex != null)
-                            IconButton(
-                              icon: const Icon(Icons.close, color: Colors.grey),
-                              onPressed: _clearForm,
-                              tooltip: 'Cancel Edit',
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 20),
-
-                      // Member No & Farm No
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _memberNoController,
-                              keyboardType: TextInputType.number,
-                              maxLength: 2,
-                              decoration: _buildInputDecoration('Member No (01-99) *', Icons.numbers, accentGreen),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: TextField(
-                              controller: _farmNoController,
-                              keyboardType: TextInputType.number,
-                              maxLength: 2,
-                              decoration: _buildInputDecoration('Farm No (01-99)', Icons.landscape, accentGreen),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-
-                      // Full Name
-                      TextField(
-                        controller: _nameController,
-                        decoration: _buildInputDecoration('Full Name *', Icons.person_outline, accentGreen),
-                      ),
-                      const SizedBox(height: 12),
-
-                      // National ID & Phone
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _idController,
-                              keyboardType: TextInputType.number,
-                              decoration: _buildInputDecoration('National ID *', Icons.badge_outlined, accentGreen),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: TextField(
-                              controller: _phoneController,
-                              keyboardType: TextInputType.phone,
-                              decoration: _buildInputDecoration('Phone Number', Icons.phone_outlined, accentGreen),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-
-                      // Location & Flock Size
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _locationController,
-                              decoration: _buildInputDecoration('Location / Sub-County', Icons.location_on_outlined, accentGreen),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: TextField(
-                              controller: _flockSizeController,
-                              keyboardType: TextInputType.number,
-                              decoration: _buildInputDecoration('Flock Size', Icons.pets, accentGreen),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-
-                      // Gender & Group Rank
-                      Row(
-                        children: [
-                          Expanded(
-                            child: DropdownButtonFormField<String>(
-                              value: _gender,
-                              items: ['Female', 'Male'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-                              onChanged: (val) => setState(() => _gender = val!),
-                              decoration: const InputDecoration(labelText: 'Gender', border: OutlineInputBorder()),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: DropdownButtonFormField<String>(
-                              value: _rank,
-                              items: ['Chairperson', 'Treasurer', 'Secretary', 'Member'].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-                              onChanged: (val) => setState(() => _rank = val!),
-                              decoration: const InputDecoration(labelText: 'Group Rank', border: OutlineInputBorder()),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 20),
-
-                      SizedBox(
-                        width: double.infinity,
-                        height: 48,
-                        child: ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: _editingIndex != null ? Colors.orange.shade800 : primaryGreen,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                          ),
-                          onPressed: _submitMember,
-                          icon: Icon(_editingIndex != null ? Icons.save : Icons.check_circle_outline, color: Colors.white),
-                          label: Text(
-                            _editingIndex != null ? 'Update Member Record' : 'Register Member',
-                            style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-                          ),
-                        ),
-                      ),
+                      Expanded(flex: 5, child: form),
+                      const SizedBox(width: 16),
+                      Expanded(flex: 6, child: log),
                     ],
-                  ),
+                  )
+                else ...[
+                  form,
+                  const SizedBox(height: 16),
+                  log,
+                ],
+                const SizedBox(height: 16),
+                _buildNoticeboard(),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ---- Member record form ----
+
+  Widget _buildForm(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.person_add_alt_1, color: _green),
+              SizedBox(width: 8),
+              Text(
+                'Tuiymet Member Profile',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _green),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Members sign up themselves. Select one to set their membership and farm number and complete their details.',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<String>(
+            key: ValueKey('sel$_selectedUid${docs.length}'),
+            initialValue: docs.any((d) => d.id == _selectedUid) ? _selectedUid : null,
+            isExpanded: true,
+            decoration: _decoration('Select Member', Icons.search),
+            items: docs
+                .map((d) => DropdownMenuItem(
+                      value: d.id,
+                      child: Text(
+                        '${d.data()['name'] ?? ''}  (${d.data()['email'] ?? ''})',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ))
+                .toList(),
+            onChanged: (uid) {
+              if (uid == null) return;
+              _select(docs.firstWhere((d) => d.id == uid));
+            },
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _memberNo,
+                  keyboardType: TextInputType.number,
+                  decoration: _decoration('Member No (01-99)', Icons.tag),
                 ),
               ),
-
-              const SizedBox(width: 16),
-
-              // 2. Members Log Panel
+              const SizedBox(width: 12),
               Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(22),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.92),
-                    borderRadius: BorderRadius.circular(24),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.06),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: accentGreen.withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: const Icon(Icons.people_outline, color: primaryGreen),
-                          ),
-                          const SizedBox(width: 12),
-                          const Text(
-                            'Registered Members Log',
-                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: primaryGreen),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      const Divider(),
-                      const SizedBox(height: 8),
-
-                      ListView.builder(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        itemCount: widget.members.length,
-                        itemBuilder: (context, index) {
-                          final m = widget.members[index];
-                          final isEditingThis = _editingIndex == index;
-
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 12),
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: isEditingThis ? Colors.orange.shade50 : Colors.white,
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(
-                                color: isEditingThis ? Colors.orange : Colors.grey.shade300,
-                                width: isEditingThis ? 2 : 1,
-                              ),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                CircleAvatar(
-                                  radius: 22,
-                                  backgroundColor: primaryGreen,
-                                  child: Text(
-                                    m['memberNo'] ?? '${index + 1}',
-                                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
-                                        children: [
-                                          Text(
-                                            m['name'] ?? '',
-                                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                                          ),
-                                          const SizedBox(width: 8),
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                            decoration: BoxDecoration(
-                                              color: primaryGreen.withValues(alpha: 0.1),
-                                              borderRadius: BorderRadius.circular(8),
-                                            ),
-                                            child: Text(
-                                              m['rank'] ?? 'Member',
-                                              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: primaryGreen),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text('ID: ${m['id']} • Phone: ${m['phone'] ?? 'N/A'}', style: const TextStyle(fontSize: 12, color: Colors.black87)),
-                                      Text('Location: ${m['location'] ?? 'N/A'} • Farm #: ${m['farmNo'] ?? 'N/A'} • Flock: ${m['flockSize'] ?? '0'}', style: const TextStyle(fontSize: 11, color: Colors.grey)),
-                                    ],
-                                  ),
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.edit, color: Colors.blueAccent, size: 20),
-                                  onPressed: () => _startEditing(index),
-                                  tooltip: 'Edit Member',
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
-                                  onPressed: () => _confirmDelete(index),
-                                  tooltip: 'Delete Member',
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-                    ],
-                  ),
+                child: TextField(
+                  controller: _farmNo,
+                  keyboardType: TextInputType.number,
+                  decoration: _decoration('Farm No (01-99)', Icons.landscape_outlined),
                 ),
               ),
             ],
           ),
-
+          const SizedBox(height: 12),
+          TextField(controller: _name, decoration: _decoration('Full Name *', Icons.person_outline)),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _idNumber,
+                  decoration: _decoration('National ID', Icons.credit_card_outlined),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: TextField(
+                  controller: _phone,
+                  keyboardType: TextInputType.phone,
+                  decoration: _decoration('Phone Number', Icons.phone_outlined),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _location,
+                  decoration: _decoration('Location / Sub-County', Icons.location_on_outlined),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: TextField(
+                  controller: _flockSize,
+                  keyboardType: TextInputType.number,
+                  decoration: _decoration('Flock Size', Icons.pets_outlined),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            key: ValueKey('gender$_selectedUid$_gender'),
+            initialValue: ['Male', 'Female'].contains(_gender) ? _gender : null,
+            decoration: _decoration('Gender', Icons.wc_outlined),
+            items: const [
+              DropdownMenuItem(value: 'Male', child: Text('Male')),
+              DropdownMenuItem(value: 'Female', child: Text('Female')),
+            ],
+            onChanged: (v) => setState(() => _gender = v ?? ''),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Group rank and portal access are set by the System Administrator.',
+            style: TextStyle(fontSize: 11, color: Colors.black54),
+          ),
           const SizedBox(height: 16),
-
-          // 3. Noticeboard Section
-          Container(
-            padding: const EdgeInsets.all(22),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.92),
-              borderRadius: BorderRadius.circular(24),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.06),
-                  blurRadius: 12,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Secretary Noticeboard', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: primaryGreen)),
-                const Text('Write updates, meeting notes, or announcements for members.', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _announcementController,
-                  maxLines: 3,
-                  decoration: const InputDecoration(
-                    hintText: 'Type an announcement or update for group members...',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Align(
-                  alignment: Alignment.centerRight,
+          Row(
+            children: [
+              Expanded(
+                child: SizedBox(
+                  height: 46,
                   child: ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(backgroundColor: primaryGreen),
-                    onPressed: _submitAnnouncement,
-                    icon: const Icon(Icons.send, color: Colors.white, size: 16),
-                    label: const Text('Post Announcement', style: TextStyle(color: Colors.white)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _green,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    onPressed: _saving ? null : () => _save(docs),
+                    icon: _saving
+                        ? const SizedBox(
+                            height: 18,
+                            width: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.check_circle_outline),
+                    label: const Text('Save Member Record'),
                   ),
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(width: 12),
+              TextButton(onPressed: _clearForm, child: const Text('Clear')),
+            ],
           ),
         ],
       ),
     );
   }
 
-  InputDecoration _buildInputDecoration(String hint, IconData icon, Color color) {
-    return InputDecoration(
-      hintText: hint,
-      prefixIcon: Icon(icon, color: color, size: 20),
-      counterText: '',
-      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+  // ---- Registered members log ----
+
+  Widget _buildLog(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
+    final q = _query.trim().toLowerCase();
+    final shown = q.isEmpty
+        ? docs
+        : docs.where((d) {
+            final m = d.data();
+            return (m['name'] ?? '').toString().toLowerCase().contains(q) ||
+                (m['phone'] ?? '').toString().toLowerCase().contains(q) ||
+                (m['email'] ?? '').toString().toLowerCase().contains(q);
+          }).toList();
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.groups_outlined, color: _green),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Registered Members Log (${docs.length})',
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.bold, color: _green),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _search,
+            onChanged: (v) => setState(() => _query = v),
+            decoration: InputDecoration(
+              hintText: 'Search by name, phone or email...',
+              prefixIcon: const Icon(Icons.search),
+              isDense: true,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              filled: true,
+              fillColor: Colors.white,
+            ),
+          ),
+          const Divider(height: 24),
+          if (shown.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(8),
+              child: Text('No members found yet.'),
+            )
+          else
+            ...shown.map((doc) {
+              final d = doc.data();
+              final bool granted = (d['isGranted'] as bool?) ?? false;
+              final String no = (d['memberNo'] ?? '').toString();
+              final String farm = (d['farmNo'] ?? '').toString();
+              final bool selected = doc.id == _selectedUid;
+              return Card(
+                color: selected ? const Color(0xFFE8F5E9) : Colors.white,
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  onTap: () => _select(doc),
+                  leading: CircleAvatar(
+                    backgroundColor: _green,
+                    foregroundColor: Colors.white,
+                    child: Text(no.isEmpty ? '--' : no),
+                  ),
+                  title: Text((d['name'] ?? '').toString(),
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text(
+                    'Farm: ${farm.isEmpty ? '-' : farm}  •  ${d['phone'] ?? ''}\n'
+                    '${d['location'] ?? ''}  •  Flock: ${d['flockSize'] ?? ''}  •  ${d['position'] ?? 'Member'}',
+                  ),
+                  isThreeLine: true,
+                  trailing: Chip(
+                    label: Text(granted ? 'Active' : 'Pending',
+                        style: const TextStyle(color: Colors.white, fontSize: 11)),
+                    backgroundColor: granted ? Colors.green : Colors.orange,
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  // ---- Noticeboard ----
+
+  Widget _buildNoticeboard() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: _cardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Secretary Noticeboard',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _green),
+          ),
+          const Text(
+            'Write updates, meeting notes, or announcements for members.',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _noticeTitle,
+            decoration: _decoration('Title', Icons.title),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _noticeBody,
+            maxLines: 4,
+            decoration: InputDecoration(
+              labelText: 'Message',
+              alignLabelWithHint: true,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              filled: true,
+              fillColor: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 46,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _green,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              onPressed: _postNotice,
+              icon: const Icon(Icons.campaign_outlined),
+              label: const Text('Post Announcement'),
+            ),
+          ),
+          if (widget.announcements.isNotEmpty) ...[
+            const Divider(height: 28),
+            const Text(
+              'Recent announcements',
+              style: TextStyle(fontWeight: FontWeight.bold, color: _green),
+            ),
+            const SizedBox(height: 8),
+            ...widget.announcements.take(10).map(
+                  (a) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.campaign, color: _green),
+                    title: Text(a['title'] ?? ''),
+                    subtitle: Text(
+                      '${a['content'] ?? ''}\n${a['by'] ?? ''}  •  ${a['date'] ?? ''}',
+                    ),
+                    isThreeLine: true,
+                  ),
+                ),
+          ],
+        ],
+      ),
     );
   }
 }
