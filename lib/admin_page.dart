@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'pending_requests.dart';
 
 class AdminPage extends StatefulWidget {
   final List<Map<String, dynamic>> memberRoles;
@@ -261,8 +262,6 @@ class _AdminPageState extends State<AdminPage> {
       _targetConfigRole = dynamicRoles.first;
     }
 
-    final pendingRequests = widget.memberRoles.where((m) => m['hasPendingRequest'] == true).toList();
-
     final filteredMembers = widget.memberRoles.where((m) {
       final query = _searchController.text.toLowerCase().trim();
       final nameMatches = (m['name'] ?? '').toLowerCase().contains(query);
@@ -325,6 +324,12 @@ class _AdminPageState extends State<AdminPage> {
           ),
 
           const SizedBox(height: 16),
+
+          // Pending Access Requests (hidden when there are none)
+          PendingRequestsCard(
+            memberRoles: widget.memberRoles,
+            onUpdateMemberRole: widget.onUpdateMemberRole,
+          ),
 
           // Position Assignment Card
           Container(
@@ -481,82 +486,6 @@ class _AdminPageState extends State<AdminPage> {
           ),
 
           const SizedBox(height: 16),
-
-          // Pending Access Requests Card (Using pendingRequests variable)
-          if (pendingRequests.isNotEmpty) ...[
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.amber.shade50,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.amber.shade400, width: 1.5),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.notifications_active, color: Colors.amber),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Pending Access Requests (${pendingRequests.length})',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.amber.shade900),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: pendingRequests.length,
-                    itemBuilder: (context, index) {
-                      final member = pendingRequests[index];
-                      final origIndex = widget.memberRoles.indexOf(member);
-
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child: Row(
-                          children: [
-                            CircleAvatar(
-                              backgroundColor: Colors.amber.shade100,
-                              child: const Icon(Icons.person, color: Colors.amber),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text('${member['name']} (${member['rank']})', style: const TextStyle(fontWeight: FontWeight.bold)),
-                                  Text('Phone: ${member['phone']} | Farm #${member['farmNo']}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                                ],
-                              ),
-                            ),
-                            ElevatedButton.icon(
-                              style: ElevatedButton.styleFrom(backgroundColor: primaryGreen),
-                              onPressed: () {
-                                final updated = Map<String, dynamic>.from(widget.memberRoles[origIndex]);
-                                updated['isGranted'] = true;
-                                updated['hasPendingRequest'] = false;
-                                widget.onUpdateMemberRole(origIndex, updated);
-                              },
-                              icon: const Icon(Icons.check, color: Colors.white, size: 16),
-                              label: const Text('Approve', style: TextStyle(color: Colors.white, fontSize: 12)),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-          ],
 
           // Search & Filter Bar
           Container(

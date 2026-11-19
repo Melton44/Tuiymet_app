@@ -1,21 +1,26 @@
 import 'package:flutter/material.dart';
+import 'pending_requests.dart';
 
 class SecretaryPage extends StatefulWidget {
   final List<Map<String, String>> members;
   final List<Map<String, String>> announcements;
+  final List<Map<String, dynamic>> memberRoles;
   final Function(Map<String, String>) onAddMember;
   final Function(int, Map<String, String>) onUpdateMember;
   final Function(int) onDeleteMember;
   final Function(Map<String, String>) onPostAnnouncement;
+  final Function(int, Map<String, dynamic>) onUpdateMemberRole;
 
   const SecretaryPage({
     super.key,
     required this.members,
     required this.announcements,
+    required this.memberRoles,
     required this.onAddMember,
     required this.onUpdateMember,
     required this.onDeleteMember,
     required this.onPostAnnouncement,
+    required this.onUpdateMemberRole,
   });
 
   @override
@@ -179,6 +184,12 @@ class _SecretaryPageState extends State<SecretaryPage> {
       padding: const EdgeInsets.all(16),
       child: Column(
         children: [
+          // 0. Pending Access Requests (hidden when there are none)
+          PendingRequestsCard(
+            memberRoles: widget.memberRoles,
+            onUpdateMemberRole: widget.onUpdateMemberRole,
+          ),
+
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [

@@ -151,6 +151,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           if ((d['role'] ?? 'Member') == 'Admin') continue;
           final email = (d['email'] ?? '').toString();
           final granted = (d['isGranted'] as bool?) ?? false;
+          final rejected = (d['requestRejected'] as bool?) ?? false;
           list.add({
             'uid': doc.id,
             'name': (d['name'] ??
@@ -165,7 +166,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
             'gender': (d['gender'] ?? '').toString(),
             'rank': (d['position'] ?? 'Member').toString(),
             'isGranted': granted,
-            'hasPendingRequest': !granted,
+            'requestRejected': rejected,
+            'hasPendingRequest': !granted && !rejected,
           });
         }
         list.sort((a, b) => (a['name'] as String)
@@ -228,7 +230,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     );
   }
 
-  // ---- Saving admin changes ----
+  // ---- Saving admin / secretary changes ----
 
   Future<void> _saveMember(String? uid, Map<String, dynamic> updated) async {
     if (uid == null || uid.isEmpty) return;
@@ -236,6 +238,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       await FirebaseFirestore.instance.collection('users').doc(uid).update({
         'position': updated['rank'] ?? 'Member',
         'isGranted': updated['isGranted'] ?? false,
+        if (updated.containsKey('requestRejected'))
+          'requestRejected': updated['requestRejected'],
       });
     } catch (e) {
       if (!mounted) return;
@@ -246,6 +250,14 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         ),
       );
     }
+  }
+
+  /// Shared by AdminPage and SecretaryPage (approve / reject / change role).
+  void _updateMemberRole(int index, Map<String, dynamic> updated) {
+    final String? uid =
+        (updated['uid'] ?? _members[index]['uid'])?.toString();
+    setState(() => _members[index] = {..._members[index], ...updated});
+    _saveMember(uid, updated);
   }
 
   Future<void> _saveRoleAccess(String role, List<int> modules) async {
@@ -347,12 +359,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       AdminPage(
         memberRoles: _members,
         roleModuleAccess: _roleModuleAccess,
-        onUpdateMemberRole: (index, updated) {
-          final String? uid =
-              (updated['uid'] ?? _members[index]['uid'])?.toString();
-          setState(() => _members[index] = {..._members[index], ...updated});
-          _saveMember(uid, updated);
-        },
+        onUpdateMemberRole: _updateMemberRole,
         onUpdateRoleModules: (role, updatedModules) {
           final modules = List<int>.from(updatedModules);
           setState(() => _roleModuleAccess[role] = modules);
@@ -368,6 +375,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       SecretaryPage(
         members: _formattedMembersList,
         announcements: _announcements,
+        memberRoles: _members,
+        onUpdateMemberRole: _updateMemberRole,
         onAddMember: (member) => setState(() => _members.add(member)),
         onUpdateMember: (index, updatedMember) =>
             setState(() => _members[index] = updatedMember),
@@ -532,7 +541,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           Future<void> grant(Map<String, dynamic> m) async {
             final String uid = m['uid'].toString();
             final String position = chosen[uid] ?? 'Member';
-            await _saveMember(uid, {'rank': position, 'isGranted': true});
+            await _saveMember(uid, {
+              'rank': position,
+              'isGranted': true,
+              'requestRejected': false,
+            });
             setDialogState(() => items.removeWhere((x) => x['uid'] == m['uid']));
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
