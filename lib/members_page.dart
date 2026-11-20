@@ -2,9 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-/// Consultation fee shown to members when they book the vet (KES).
-const int kVetConsultationFee = 1500;
-
 const Color _green = Color(0xFF1B5E20);
 
 BoxDecoration _cardDecoration() => BoxDecoration(
@@ -431,7 +428,6 @@ class _VetBookingTabState extends State<_VetBookingTab> {
         'memberName': _memberName.isNotEmpty ? _memberName : (user.email ?? ''),
         'memberEmail': _memberEmail,
         'farmerName': _farmer.text.trim(),
-        'fee': kVetConsultationFee,
         'date': _fmt(_date!),
         'reason': _reason.text.trim(),
         'status': 'Pending',
@@ -461,6 +457,8 @@ class _VetBookingTabState extends State<_VetBookingTab> {
         return Colors.green;
       case 'Declined':
         return Colors.red;
+      case 'Cancelled':
+        return Colors.grey;
       default:
         return Colors.orange;
     }
@@ -492,25 +490,17 @@ class _VetBookingTabState extends State<_VetBookingTab> {
               const SizedBox(height: 16),
               TextField(controller: _farmer, decoration: _decoration('Farmer Name / Farm No')),
               const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: InputDecorator(
-                      decoration: _decoration('Fee (KES)'),
-                      child: const Text('$kVetConsultationFee'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: InkWell(
-                      onTap: _pickDate,
-                      child: InputDecorator(
-                        decoration: _decoration('Date'),
-                        child: Text(_date == null ? 'Pick a date' : _fmt(_date!)),
-                      ),
-                    ),
-                  ),
-                ],
+              InkWell(
+                onTap: _pickDate,
+                child: InputDecorator(
+                  decoration: _decoration('Preferred Date'),
+                  child: Text(_date == null ? 'Pick a date' : _fmt(_date!)),
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'The vet will review your request and set the consultation fee when approving.',
+                style: TextStyle(fontSize: 12, color: Colors.black54),
               ),
               const SizedBox(height: 12),
               TextField(
@@ -588,7 +578,11 @@ class _VetBookingTabState extends State<_VetBookingTab> {
                           contentPadding: EdgeInsets.zero,
                           leading: const Icon(Icons.event_note, color: _green),
                           title: Text('${d['date'] ?? ''}  •  ${d['reason'] ?? ''}'),
-                          subtitle: Text('Fee: KES ${d['fee'] ?? ''}'),
+                          subtitle: Text(
+                            d['fee'] == null
+                                ? 'Fee: to be set by the vet'
+                                : 'Fee: KES ${d['fee']}',
+                          ),
                           trailing: Chip(
                             label: Text(status,
                                 style: const TextStyle(color: Colors.white, fontSize: 12)),

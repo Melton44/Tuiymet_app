@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class VetPage extends StatefulWidget {
   final Function(Map<String, String>) onPostAnnouncement;
@@ -49,22 +50,6 @@ class _VetPageState extends State<VetPage> {
 
   // Vet Announcement Controller
   final _announcementController = TextEditingController();
-
-  // Appointment Controllers & State
-  final _consultationFeeController = TextEditingController(text: '1500');
-  final _farmerNameController = TextEditingController();
-  final _appointmentReasonController = TextEditingController();
-  final _appointmentDateController = TextEditingController();
-  int? _editingAppointmentIndex;
-
-  final List<Map<String, String>> _appointments = [
-    {
-      'farmer': 'Vincent (Farm #01)',
-      'date': '2026-10-25',
-      'reason': 'Routine flock pregnancy check & BCS assessment.',
-      'fee': '1500',
-    },
-  ];
 
   // --- VACCINATION METHODS ---
   void _submitVaccinationRecord() {
@@ -163,83 +148,104 @@ class _VetPageState extends State<VetPage> {
     );
   }
 
-  // --- APPOINTMENT METHODS ---
-  void _submitAppointment() {
-    if (_appointmentDateController.text.trim().isEmpty || _appointmentReasonController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter appointment date and reason')),
-      );
-      return;
-    }
+  // --- APPOINTMENT METHODS (live from Firestore) ---
 
-    final appt = {
-      'farmer': _farmerNameController.text.trim().isEmpty ? 'General Member Visit' : _farmerNameController.text.trim(),
-      'date': _appointmentDateController.text.trim(),
-      'reason': _appointmentReasonController.text.trim(),
-      'fee': _consultationFeeController.text.trim().isEmpty ? '0' : _consultationFeeController.text.trim(),
-    };
+  int? _parseFee(String raw) {
+    final n = int.tryParse(raw.trim());
+    if (n == null || n <= 0) return null;
+    return n;
+  }
 
-    setState(() {
-      if (_editingAppointmentIndex != null) {
-        _appointments[_editingAppointmentIndex!] = appt;
-        _editingAppointmentIndex = null;
-      } else {
-        _appointments.insert(0, appt);
-      }
-    });
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _withStatus(
+    QuerySnapshot<Map<String, dynamic>> snap,
+    String status,
+  ) {
+    final list = snap.docs.where((d) => d.data()['status'] == status).toList();
+    list.sort((a, b) => (a.data()['date'] ?? '')
+        .toString()
+        .compareTo((b.data()['date'] ?? '').toString()));
+    return list;
+  }
 
-    _clearAppointmentForm();
+  void _toast(String msg, {bool error = false}) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Appointment saved successfully!')),
-    );
-  }
-
-  void _startEditingAppointment(int index) {
-    final a = _appointments[index];
-    setState(() {
-      _editingAppointmentIndex = index;
-      _farmerNameController.text = a['farmer'] ?? '';
-      _appointmentDateController.text = a['date'] ?? '';
-      _appointmentReasonController.text = a['reason'] ?? '';
-      _consultationFeeController.text = a['fee'] ?? '1500';
-    });
-  }
-
-  void _deleteAppointment(int index) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete Appointment'),
-        content: Text('Are you sure you want to cancel the booking for ${_appointments[index]['farmer']}?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-            onPressed: () {
-              setState(() {
-                _appointments.removeAt(index);
-                if (_editingAppointmentIndex == index) _clearAppointmentForm();
-              });
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Appointment deleted')),
-              );
-            },
-            child: const Text('Delete', style: TextStyle(color: Colors.white)),
-          ),
-        ],
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: error ? Colors.red : const Color(0xFF1B5E20),
       ),
     );
   }
 
-  void _clearAppointmentForm() {
-    setState(() {
-      _editingAppointmentIndex = null;
-      _farmerNameController.clear();
-      _appointmentDateController.clear();
-      _appointmentReasonController.clear();
-      _consultationFeeController.text = '1500';
-    });
+  Future<void> _editFee(QueryDocumentSnapshot<Map<String, dynamic>> doc) async {
+    final current = (doc.data()['fee'] as num?)?.toInt();
+    final controller = TextEditingController(text: current?.toString() ?? '');
+    final result = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit consultation fee'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Fee (KES)'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              final fee = _parseFee(controller.text);
+              if (fee != null) Navigator.pop(ctx, fee);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (result == null) return;
+    try {
+      await doc.reference.update({'fee': result});
+      _toast('Fee updated to KES $result');
+    } catch (e) {
+      _toast('Could not update fee: $e', error: true);
+    }
+  }
+
+  Future<void> _markDone(QueryDocumentSnapshot<Map<String, dynamic>> doc) async {
+    try {
+      await doc.reference.update({'status': 'Completed'});
+      _toast('Appointment marked as done.');
+    } catch (e) {
+      _toast('Could not update: $e', error: true);
+    }
+  }
+
+  void _cancelAppointment(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel Appointment'),
+        content: Text(
+            'Cancel the booking for ${doc.data()['farmerName'] ?? 'this member'}? The member will see it as Cancelled.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Keep')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              try {
+                await doc.reference.update({'status': 'Cancelled'});
+                _toast('Appointment cancelled.');
+              } catch (e) {
+                _toast('Could not cancel: $e', error: true);
+              }
+            },
+            child: const Text('Cancel Appointment', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -251,10 +257,6 @@ class _VetPageState extends State<VetPage> {
     _flockSizeController.dispose();
     _preventiveMeasuresController.dispose();
     _announcementController.dispose();
-    _consultationFeeController.dispose();
-    _farmerNameController.dispose();
-    _appointmentReasonController.dispose();
-    _appointmentDateController.dispose();
     super.dispose();
   }
 
@@ -548,7 +550,7 @@ class _VetPageState extends State<VetPage> {
 
           const SizedBox(height: 18),
 
-          // 3. Announcements Broadcast & Appointments Section
+          // 3. Announcements Broadcast & Consultation Requests
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -619,7 +621,7 @@ class _VetPageState extends State<VetPage> {
 
               const SizedBox(width: 16),
 
-              // Book Appointment & Consultation Fee Card
+              // Consultation Requests Card (members' bookings waiting for approval)
               Expanded(
                 child: Container(
                   padding: const EdgeInsets.all(22),
@@ -638,92 +640,52 @@ class _VetPageState extends State<VetPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Row(
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: accentGreen.withValues(alpha: 0.12),
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: Icon(_editingAppointmentIndex != null ? Icons.edit_calendar : Icons.event_available_outlined, color: primaryGreen),
-                              ),
-                              const SizedBox(width: 12),
-                              Text(
-                                _editingAppointmentIndex != null ? 'Edit Appointment' : 'Book Vet Appointment',
-                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: primaryGreen),
-                              ),
-                            ],
-                          ),
-                          if (_editingAppointmentIndex != null)
-                            IconButton(
-                              icon: const Icon(Icons.close, color: Colors.grey),
-                              onPressed: _clearAppointmentForm,
-                              tooltip: 'Cancel Edit',
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: accentGreen.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                        ],
-                      ),
-                      const SizedBox(height: 14),
-                      TextField(
-                        controller: _farmerNameController,
-                        decoration: const InputDecoration(
-                          labelText: 'Farmer Name / Farm No',
-                          hintText: 'e.g. Vincent (Farm #01)',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _consultationFeeController,
-                              keyboardType: TextInputType.number,
-                              decoration: const InputDecoration(
-                                labelText: 'Fee (KES)',
-                                border: OutlineInputBorder(),
-                              ),
-                            ),
+                            child: const Icon(Icons.pending_actions, color: primaryGreen),
                           ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: TextField(
-                              controller: _appointmentDateController,
-                              decoration: const InputDecoration(
-                                labelText: 'Date (YYYY-MM-DD)',
-                                border: OutlineInputBorder(),
-                              ),
+                          const SizedBox(width: 12),
+                          const Expanded(
+                            child: Text(
+                              'Consultation Requests',
+                              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: primaryGreen),
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: _appointmentReasonController,
-                        decoration: const InputDecoration(
-                          labelText: 'Reason for Consultation',
-                          hintText: 'e.g. Deworming session / Illness check',
-                          border: OutlineInputBorder(),
-                        ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Booked by members. Enter the fee, then approve.',
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
                       ),
                       const SizedBox(height: 14),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 44,
-                        child: ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: _editingAppointmentIndex != null ? Colors.orange.shade800 : primaryGreen,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                          onPressed: _submitAppointment,
-                          icon: Icon(_editingAppointmentIndex != null ? Icons.save : Icons.add_task_outlined, color: Colors.white, size: 18),
-                          label: Text(
-                            _editingAppointmentIndex != null ? 'Update Appointment' : 'Book Appointment',
-                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                          ),
-                        ),
+                      StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                        stream: FirebaseFirestore.instance.collection('appointments').snapshots(),
+                        builder: (context, snap) {
+                          if (snap.hasError) {
+                            return Text('Could not load requests: ${snap.error}');
+                          }
+                          if (!snap.hasData) {
+                            return const Center(child: CircularProgressIndicator());
+                          }
+                          final pending = _withStatus(snap.data!, 'Pending');
+                          if (pending.isEmpty) {
+                            return const Text(
+                              'No pending consultation requests.',
+                              style: TextStyle(color: Colors.grey),
+                            );
+                          }
+                          return Column(
+                            children: pending
+                                .map((doc) => _PendingRequestCard(key: ValueKey(doc.id), doc: doc))
+                                .toList(),
+                          );
+                        },
                       ),
                     ],
                   ),
@@ -734,7 +696,7 @@ class _VetPageState extends State<VetPage> {
 
           const SizedBox(height: 18),
 
-          // 4. Scheduled Appointments Log
+          // 4. Scheduled (approved) Appointments Log
           Container(
             padding: const EdgeInsets.all(22),
             decoration: BoxDecoration(
@@ -753,73 +715,92 @@ class _VetPageState extends State<VetPage> {
               children: [
                 const Text('Scheduled Vet Appointments', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: primaryGreen)),
                 const SizedBox(height: 10),
-                ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _appointments.length,
-                  itemBuilder: (context, index) {
-                    final appt = _appointments[index];
-                    final isEditing = _editingAppointmentIndex == index;
-
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 10),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: isEditing ? Colors.orange.shade50 : Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: isEditing ? Colors.orange : Colors.grey.shade300,
-                          width: isEditing ? 2 : 1,
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          CircleAvatar(
-                            backgroundColor: primaryGreen.withValues(alpha: 0.1),
-                            child: const Icon(Icons.calendar_month, color: primaryGreen, size: 20),
+                StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                  stream: FirebaseFirestore.instance.collection('appointments').snapshots(),
+                  builder: (context, snap) {
+                    if (snap.hasError) {
+                      return Text('Could not load appointments: ${snap.error}');
+                    }
+                    if (!snap.hasData) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    final approved = _withStatus(snap.data!, 'Confirmed');
+                    if (approved.isEmpty) {
+                      return const Text(
+                        'No approved appointments yet.',
+                        style: TextStyle(color: Colors.grey),
+                      );
+                    }
+                    return Column(
+                      children: approved.map((doc) {
+                        final appt = doc.data();
+                        final int? fee = (appt['fee'] as num?)?.toInt();
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.grey.shade300),
                           ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                backgroundColor: primaryGreen.withValues(alpha: 0.1),
+                                child: const Icon(Icons.calendar_month, color: primaryGreen, size: 20),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Text(
-                                      '${appt['farmer']} — ${appt['date']}',
-                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                    Row(
+                                      children: [
+                                        Flexible(
+                                          child: Text(
+                                            '${appt['farmerName'] ?? ''} — ${appt['date'] ?? ''}',
+                                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: primaryGreen.withValues(alpha: 0.1),
+                                            borderRadius: BorderRadius.circular(8),
+                                          ),
+                                          child: Text(
+                                            fee == null ? 'No fee set' : 'KES $fee',
+                                            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: primaryGreen),
+                                          ),
+                                        ),
+                                      ],
                                     ),
-                                    const SizedBox(width: 8),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                      decoration: BoxDecoration(
-                                        color: primaryGreen.withValues(alpha: 0.1),
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Text(
-                                        'KES ${appt['fee']}',
-                                        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: primaryGreen),
-                                      ),
-                                    ),
+                                    const SizedBox(height: 4),
+                                    Text('Reason: ${appt['reason'] ?? ''}', style: const TextStyle(fontSize: 12, color: Colors.black87)),
+                                    Text('Member: ${appt['memberName'] ?? ''}', style: const TextStyle(fontSize: 11, color: Colors.grey)),
                                   ],
                                 ),
-                                const SizedBox(height: 4),
-                                Text('Reason: ${appt['reason']}', style: const TextStyle(fontSize: 12, color: Colors.black87)),
-                              ],
-                            ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.edit_outlined, color: Colors.blueAccent, size: 20),
+                                onPressed: () => _editFee(doc),
+                                tooltip: 'Edit fee',
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.check_circle_outline, color: primaryGreen, size: 22),
+                                onPressed: () => _markDone(doc),
+                                tooltip: 'Mark done',
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
+                                onPressed: () => _cancelAppointment(doc),
+                                tooltip: 'Cancel appointment',
+                              ),
+                            ],
                           ),
-                          IconButton(
-                            icon: const Icon(Icons.edit_outlined, color: Colors.blueAccent, size: 20),
-                            onPressed: () => _startEditingAppointment(index),
-                            tooltip: 'Edit Appointment',
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
-                            onPressed: () => _deleteAppointment(index),
-                            tooltip: 'Delete Appointment',
-                          ),
-                        ],
-                      ),
+                        );
+                      }).toList(),
                     );
                   },
                 ),
@@ -845,6 +826,133 @@ class _VetPageState extends State<VetPage> {
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(12),
         borderSide: const BorderSide(color: Colors.white, width: 1.5),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// One pending consultation request: fee box + Approve / Decline
+// ---------------------------------------------------------------------------
+
+class _PendingRequestCard extends StatefulWidget {
+  final QueryDocumentSnapshot<Map<String, dynamic>> doc;
+  const _PendingRequestCard({super.key, required this.doc});
+
+  @override
+  State<_PendingRequestCard> createState() => _PendingRequestCardState();
+}
+
+class _PendingRequestCardState extends State<_PendingRequestCard> {
+  final _fee = TextEditingController();
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _fee.dispose();
+    super.dispose();
+  }
+
+  void _toast(String msg, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: error ? Colors.red : const Color(0xFF1B5E20),
+      ),
+    );
+  }
+
+  Future<void> _approve() async {
+    final n = int.tryParse(_fee.text.trim());
+    if (n == null || n <= 0) {
+      _toast('Enter the consultation fee (KES) before approving.', error: true);
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await widget.doc.reference.update({
+        'status': 'Confirmed',
+        'fee': n,
+        'approvedAt': FieldValue.serverTimestamp(),
+      });
+      _toast('Appointment approved. Fee: KES $n');
+    } catch (e) {
+      _toast('Could not approve: $e', error: true);
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _decline() async {
+    setState(() => _busy = true);
+    try {
+      await widget.doc.reference.update({'status': 'Declined'});
+      _toast('Request declined.');
+    } catch (e) {
+      _toast('Could not decline: $e', error: true);
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const Color primaryGreen = Color(0xFF1B5E20);
+    final d = widget.doc.data();
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.orange.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            (d['farmerName'] ?? '').toString(),
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+          ),
+          Text(
+            'Requested by: ${d['memberName'] ?? ''}  (${d['memberEmail'] ?? ''})',
+            style: const TextStyle(fontSize: 11, color: Colors.black54),
+          ),
+          const SizedBox(height: 6),
+          Text('Date: ${d['date'] ?? ''}', style: const TextStyle(fontSize: 13)),
+          Text('Reason: ${d['reason'] ?? ''}', style: const TextStyle(fontSize: 13)),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _fee,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: 'Consultation Fee (KES)',
+              isDense: true,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: primaryGreen,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: _busy ? null : _approve,
+                  icon: const Icon(Icons.check_circle_outline, size: 18),
+                  label: const Text('Approve'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: _busy ? null : _decline,
+                child: const Text('Decline', style: TextStyle(color: Colors.red)),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
